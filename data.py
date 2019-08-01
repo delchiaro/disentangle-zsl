@@ -9,10 +9,16 @@ import shutil
 DATA_PATH = './data/'
 
 def download_data():
-    os.mkdir('data')
+    # Ensure data dir exists.
+    try:
+        os.mkdir(DATA_PATH)
+    except FileExistsError:
+        pass
+
+    # Download and unzip.
     os.system('wget http://datasets.d2.mpi-inf.mpg.de/xian/xlsa17.zip')
-    os.system('unzip ./data/xlsa17.zip')
-    os.remove(DATA_PATH+'xlsa17.zip')
+    os.system(f'unzip ./xlsa17.zip -d {DATA_PATH}')
+    os.remove('xlsa17.zip')
 
 
 def preprocess_dataset(dataset_name):
