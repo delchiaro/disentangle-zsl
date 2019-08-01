@@ -102,12 +102,12 @@ def get_dataset(dataset, use_valid=False, gzsl=False):
         train = get_data(dataset, 'trainval')
         val = None
 
-    test = get_data(dataset, 'test_unseen')
+    test_unseen = get_data(dataset, 'test_unseen')
+    test_seen = None
     if gzsl:
         test_seen = get_data(dataset, 'test_seen')
-        test = [np.concatenate([unseen_stuff, seen_stuff], axis=0) for unseen_stuff, seen_stuff in zip(test, test_seen)]
 
-    return train, val, test
+    return train, val, test_unseen, test_seen
 
 
 def normalize_dataset(train, val=None, test=None, feats_range=(0, 1)):

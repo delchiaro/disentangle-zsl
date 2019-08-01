@@ -171,7 +171,8 @@ class DisentangleZSL(Module):
         opt.step()
         return reconstruct_loss, attr_reconstruct_loss, classifier_loss, disentangle_loss
 
-    def generate_feats(self, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
+
+    def generate_encs(self, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
         dl = DataLoader(TensorDataset(train_feats), batch_size=bs, shuffle=False)
 
         attr_encoding = []
@@ -215,7 +216,38 @@ class DisentangleZSL(Module):
         gen_attr_encs = torch.stack(gen_attr_encs)
         #gen_cntx_encs = cntx_encoding.mean(dim=0).view(1, -1).repeat([len(gen_attr_encs), 1])
         gen_cntx_encs = cntx_encoding[torch.randperm(cntx_encoding.size(0))[:len(gen_attr_encs)]]
+        return gen_attr_encs, gen_cntx_encs, attrs, labels
 
+
+    def generate_feats(self, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
+        gen_attr_encs, gen_cntx_encs, attrs, labels = self.generate_encs(train_feats, train_attrs, test_attrs,
+                                                                         nb_gen_samples, threshold, nb_random_mean, bs)
         gen_feats = self.decode(gen_attr_encs.to(self.device), gen_cntx_encs.to(self.device), attrs.to(self.device)).detach().cpu()
         return gen_feats, labels
 
+
+    def enc_predict(self, attr_enc, cntx_enc, all_attrs):
+        nb_classes = len(all_attrs)
+        bs = attr_enc.shape[0]
+        attr_enc_exp = interlaced_repeat(attr_enc, dim=0, times=nb_classes)
+        all_attrs_exp = all_attrs.repeat([bs, 1])
+        cntx_enc_exp = interlaced_repeat(cntx_enc, dim=0, times=nb_classes)
+
+        all_feats = self.decode(attr_enc_exp, cntx_enc_exp, all_attrs_exp)
+        logits = self.classify(all_feats)
+        t = torch.tensor([[t] for t in list(range(nb_classes)) * bs]).to(self.device)
+        logits_diags = torch.gather(logits, 1, t).view(bs, nb_classes)
+        return logits_diags
+
+    def predict(self, X, all_attrs):
+        attr_enc, cntx_enc = self.encode(X)
+        return self.enc_predict(attr_enc, cntx_enc, all_attrs)
+
+    def cheaty_predict(self, X, Y, all_attrs):
+        attr_enc, cntx_enc = self.encode(X)
+        A = all_attrs[Y]
+        #attr_enc_exp_masked = self.mask_attr_enc(attr_enc, A)
+        decoded = self.decode(attr_enc, cntx_enc, all_attrs)
+        logits = self.classify(decoded)
+        softmax = NN.softmax(logits, dim=1)
+        return softmax
