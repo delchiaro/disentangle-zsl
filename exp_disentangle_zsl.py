@@ -356,6 +356,8 @@ def main():
         print(f"=======================================================")
         print(f"\n\n\n\n")
 
+        # Checkpoint model.
+        torch.save(net, 'checkpoint.pt')
         X = X.detach().cpu().numpy()
         #rec = net.reconstruct(X, train['class_attr'][Y.detach().cpu().numpy()])
 

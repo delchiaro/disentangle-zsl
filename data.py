@@ -1,5 +1,4 @@
 from pathlib import Path
-
 from sklearn import preprocessing
 import numpy as np
 import scipy.io
@@ -125,3 +124,4 @@ def normalize_dataset(train, val=None, test=None, feats_range=(0, 1)):
         if test is not None:
             test['feats'] = min_max_scaler.transform(test['feats'])
     return train, val, test
+
