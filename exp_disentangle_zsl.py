@@ -370,7 +370,6 @@ def main():
         print(f"=======================================================")
         print(f"\n\n\n\n")
 
-        X = X.detach().cpu().numpy()
         #rec = net.reconstruct(X, train['class_attr'][Y.detach().cpu().numpy()])
 
         if (ep+1) == first_test_epoch or ((ep+1) >= first_test_epoch and (ep+1)%test_period==0):
