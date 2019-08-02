@@ -25,7 +25,7 @@ def init_weights(m: Module):
 
 def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
              attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_samples=30, nb_random_means=1, threshold=.5,
-             classifier_hiddens=(512,), generalized=None):
+             classifier_hiddens=(512,), generalized=None, lr=.001):
     if generalized is None:
        generalized = True if seen_test_dict is not None else False
 
@@ -64,7 +64,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
     adapt_net.reset_classifiers(len(set(NP(unseen_gen_labels))), classifier_hiddens, classifier_hiddens)
 
     gen_loader = DataLoader(TensorDataset(unseen_gen_feats, unseen_gen_labels), batch_size=bs, num_workers=2, shuffle=True)
-    opt = torch.optim.Adam(adapt_net.classifier.parameters(), lr=.001)
+    opt = torch.optim.Adam(adapt_net.classifier.parameters(), lr=lr)
     for ep in range(nb_epochs):
         preds = []
         y_trues = []
@@ -147,7 +147,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
 def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
              attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_samples=30, nb_random_means=1, threshold=.5,
-             classifier_hiddens=(512,), generalized=None):
+             classifier_hiddens=(512,), generalized=None, lr=.001):
     if generalized is None:
        generalized = True if seen_test_dict is not None else False
 
@@ -184,7 +184,7 @@ def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
     adapt_net = deepcopy(net)
     adapt_net.reset_classifiers(len(set(NP(gen_labels))), classifier_hiddens, classifier_hiddens)
     gen_loader = DataLoader(TensorDataset(gen_attr_encs, gen_cntx_encs, gen_attr, gen_labels), batch_size=bs, num_workers=2, shuffle=True)
-    opt = torch.optim.Adam(list(adapt_net.classifier.parameters()) + list(adapt_net.pre_decoder.parameters()), lr=.001)
+    opt = torch.optim.Adam(list(adapt_net.classifier.parameters()) + list(adapt_net.pre_decoder.parameters()), lr=lr)
     for ep in range(nb_epochs):
         preds = []
         y_trues = []
@@ -284,6 +284,9 @@ def main():
     nb_class_epochs = 3
     generalized = False
 
+    adapt_lr = .0001
+    lr = .0001
+
     if DATASET.startswith('AWA'):
         nb_gen_samples = 200
     elif DATASET == 'CUB':
@@ -307,10 +310,12 @@ def main():
 
     net = DisentangleZSL(nb_classes=train[ATTRS_KEY].shape[1], feats_dim=feats_dim,
                          pre_encoder_units=(1024, 512),  attr_encoder_units=(32,), cntx_encoder_units=(128,),
-                         pre_decoder_units=None, decoder_units=(512,1024,2048),
-                         classifier_hiddens=(512,1024), cntx_classifier_hiddens=(512,1024),
+
+                         pre_decoder_units=(512,), decoder_units=(1024,2048),
+                         classifier_hiddens=(1024,), cntx_classifier_hiddens=(1024,),
+
                          attr_regr_hiddens=(32,)).to(device)
-    opt = torch.optim.Adam(net.parameters())
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
 
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -371,7 +376,7 @@ def main():
                          nb_epochs=nb_class_epochs, nb_gen_samples=nb_gen_samples, nb_random_means=1,
                          threshold=np.mean(test_unseen[ATTRS_KEY]),
                          #threshold=50,
-                         classifier_hiddens=None)
+                         classifier_hiddens=None, lr=adapt_lr)
 
 
 if __name__ == '__main__':
