@@ -72,7 +72,8 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         for X, Y in gen_loader:
             X, Y = X.to(device), Y.to(device)
             opt.zero_grad()
-            decoded, logits, cntx_logits, _ = adapt_net.forward(X, A[Y])
+            #decoded, logits, cntx_logits, _ = adapt_net.forward(X, A[Y])
+            logits = adapt_net.classifier(X)
             loss = NN.cross_entropy(logits, Y)
             loss.backward()
             opt.step()
@@ -82,8 +83,8 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         preds = torch.cat(preds)
         y_trues = torch.cat(y_trues)
         acc = (y_trues == preds).float().mean()
-        losses = torch.stack(losses).mean()
-        print(f"Classifier adaptation - Epoch {ep+1}/{nb_epochs}:   Loss={losses:1.5f}    Acc={acc:1.4f}")
+        full_net_losses = torch.stack(losses).mean()
+        print(f"Classifier adaptation - Epoch {ep+1}/{nb_epochs}:   Loss={full_net_losses:1.5f}    Acc={acc:1.4f}")
 
     ######## TEST ON TEST-SET ###########
     unseen_test_feats = torch.tensor(unseen_test_feats).float()
@@ -93,51 +94,52 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         dl_seen = DataLoader(TensorDataset(seen_test_feats, seen_test_labels), batch_size=bs, num_workers=2)
         dloaders.append(dl_seen)
 
-    accs = []
-    accs2 = []
-    losses = []
-    losses2 = []
+    full_net_acc = []
+    classifier_only_acc = []
+    full_net_loss = []
+    classifier_only_loss = []
     for test_loader in dloaders:
-        preds = []
-        preds2 = []
+        full_net_preds = []
+        classifier_only_preds = []
         y_trues = []
-        loss = []
-        loss2 = []
+        full_net_losses = []
+        classifier_only_losses = []
         for X, Y in test_loader:
             X = X.to(device)
             Y = Y.to(device)
             #decoded, logits, _ = net_copy.forward(X, A[Y]) # BUG HERE: I'm using label information during forward.
-
             #net_copy.enc_predict(attr_enc, cntx_enc, A)
+            #_, logits2, cntx_logits2, _ = adapt_net.forward(X)
+            full_net_logits = adapt_net.predict(X, A)
+            classifier_only_logits = adapt_net.classifier(X)
 
-            logits = adapt_net.predict(X, A)
-            _, logits2, cntx_logits2, _ = adapt_net.forward(X)
-            # logits1 = net_copy.classifier(X)
+            full_net_l = NN.cross_entropy(full_net_logits, Y)
+            full_net_losses.append(full_net_l.detach().cpu())
+            full_net_preds.append(full_net_logits.argmax(dim=1))
 
-            l = NN.cross_entropy(logits, Y)
-            loss.append(l.detach().cpu())
-            preds.append(logits.argmax(dim=1))
-
-            l2 = NN.cross_entropy(logits2, Y)
-            loss2.append(l2.detach().cpu())
-            preds2.append(logits2.argmax(dim=1))
+            classifier_only_l = NN.cross_entropy(classifier_only_logits, Y)
+            classifier_only_losses.append(classifier_only_l.detach().cpu())
+            classifier_only_preds.append(classifier_only_logits.argmax(dim=1))
 
 
 
             y_trues.append(Y)
-        preds = torch.cat(preds)
-        preds2 = torch.cat(preds2)
+        full_net_preds = torch.cat(full_net_preds)
+        classifier_only_preds = torch.cat(classifier_only_preds)
         y_trues = torch.cat(y_trues)
-        accs.append((y_trues == preds).float().mean())
-        accs2.append((y_trues == preds2).float().mean())
-        losses.append(torch.stack(loss).mean())
-        losses2.append(torch.stack(loss2).mean())
+        full_net_acc.append((y_trues == full_net_preds).float().mean())
+        classifier_only_acc.append((y_trues == classifier_only_preds).float().mean())
+        full_net_loss.append(torch.stack(full_net_losses).mean())
+        classifier_only_loss.append(torch.stack(classifier_only_losses).mean())
 
-    unseen_acc, unseen_loss = accs[0], losses[0]
-    print(f"\nClassifier adaptation - Final Test - Unseen:   Loss={unseen_loss:1.5f}    Acc={unseen_acc:1.4f}\n")
-    print(f"\nClassifier adaptation - Final Test - Unseen:   Loss={losses2[0]:1.5f}     Acc={accs2[0]:1.4f}\n")
+    full_net_unseen_acc, full_net_unseen_loss = full_net_acc[0], full_net_losses[0]
+    unseen_acc, unseen_loss = classifier_only_acc[0], classifier_only_loss[0]
+
+    print(f"\nClassifier adaptation - Final Test - Unseen (classifier-only): Loss={unseen_loss:1.5f}    Acc={unseen_acc:1.4f}\n")
+    print(f"\nClassifier adaptation - Final Test - Unseen (full-net):        Loss={full_net_unseen_loss:1.5f}     Acc={full_net_unseen_acc:1.4f}\n")
     if generalized:
-        seen_acc, seen_loss = accs[1], losses[1]
+        #seen_acc, seen_loss = classifier_only_acc[0], classifier_only_loss[0]
+        seen_acc, seen_loss = classifier_only_acc[1], classifier_only_loss[1]
         H_acc = 2 * (seen_acc * unseen_acc) /  (seen_acc + unseen_acc)
         print(f"\n                                   -   Seen:   Loss={seen_loss:1.5f}    Acc={seen_acc:1.4f}\n")
         print(f"\n                                   -      H:                  Acc={H_acc:1.4f}\n")
@@ -280,12 +282,12 @@ def main():
 
     bs = 128
     nb_epochs = 100
-    first_test_epoch, test_period = 1, 1
-    nb_class_epochs = 3
+    first_test_epoch, test_period = 3, 1
+    nb_class_epochs = 20
     generalized = False
 
-    adapt_lr = .0001
-    lr = .0001
+    adapt_lr = .0002
+    lr = .00002
 
     if DATASET.startswith('AWA'):
         nb_gen_samples = 200
@@ -311,8 +313,12 @@ def main():
     net = DisentangleZSL(nb_classes=train[ATTRS_KEY].shape[1], feats_dim=feats_dim,
                          pre_encoder_units=(1024, 512),  attr_encoder_units=(32,), cntx_encoder_units=(128,),
 
-                         pre_decoder_units=(512,), decoder_units=(1024,2048),
-                         classifier_hiddens=(1024,), cntx_classifier_hiddens=(1024,),
+                         pre_decoder_units=(512, 1024, 2048),
+                         decoder_units=None,
+                         classifier_hiddens=(512,),
+
+                         cntx_classifier_hiddens=(1024,),
+
 
                          attr_regr_hiddens=(32,)).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=lr)
@@ -372,7 +378,7 @@ def main():
             print(f"=========         STARTING  TEST        ===============")
             print(f"=======================================================")
 
-            run_test_new(net, train, test_unseen, test_seen,
+            run_test_old(net, train, test_unseen, test_seen,
                          nb_epochs=nb_class_epochs, nb_gen_samples=nb_gen_samples, nb_random_means=1,
                          threshold=np.mean(test_unseen[ATTRS_KEY]),
                          #threshold=50,

@@ -158,7 +158,7 @@ class DisentangleZSL(Module):
         loss = 100 * reconstruct_loss + \
                10 * attr_reconstruct_loss + \
                1 * classifier_loss + \
-               .1 * cntx_classifier_loss + \
+               0 * cntx_classifier_loss + \
                1 * disentangle_loss
         loss.backward()
         opt.step()
