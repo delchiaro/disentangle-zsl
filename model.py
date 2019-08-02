@@ -5,6 +5,8 @@ from torch.nn import functional as NN
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, TensorDataset
 
+from layers import get_fc_net, get_1by1_conv1d_net, GradientReversal
+
 
 def interlaced_repeat(x, dim, times):
     orig_shape = x.shape
@@ -23,41 +25,10 @@ def interlaced_repeat(x, dim, times):
     return x
 
 
-def get_fc_net(input_size: int, hidden_sizes: list, output_size: int=None, hidden_activations=nn.ReLU, out_activation=None):
-    hidden_sizes = [] if hidden_sizes is None else hidden_sizes
-    hidden_sizes = list(hidden_sizes) + ([output_size] if output_size is not None else [])
-    decoder_hiddens = [nn.Linear(input_size, hidden_sizes[0])]
-    prev_size = hidden_sizes[0]
-    for size in hidden_sizes[1:]:
-        if hidden_activations is not None:
-            decoder_hiddens.append(hidden_activations())
-        decoder_hiddens.append(nn.Linear(prev_size, size))
-        prev_size = size
-    if out_activation is not None:
-        decoder_hiddens.append(out_activation)
-    return nn.Sequential(*decoder_hiddens)
-
-def get_1by1_conv1d_net(in_channels: int, hidden_channels: list, output_channels: int=None, hidden_activations=nn.ReLU, out_activation=None):
-    hidden_channels = [] if hidden_channels is None else hidden_channels
-    hidden_channels = list(hidden_channels) + ([output_channels] if output_channels is not None else [])
-    hiddens = []
-    prev_channels = in_channels
-    for channels in hidden_channels[:-1]:
-        hiddens.append(nn.Conv1d(prev_channels, out_channels=channels, kernel_size=1, stride=1))
-        prev_channels = channels
-        if hidden_activations is not None:
-            hiddens.append(hidden_activations())
-    hiddens.append(nn.Conv1d(prev_channels, out_channels=hidden_channels[-1], kernel_size=1, stride=1))
-    if out_activation is not None:
-        hiddens.append(out_activation())
-    return nn.Sequential(*hiddens)
-
 class DisentangleZSL(Module):
-
-
     @property
     def full_encoding_dim(self):
-        return self.nb_attr * self.attr_enc_dim + self.cntx_enc_dim
+        return self.nb_classes * self.attr_enc_dim + self.cntx_enc_dim
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -65,31 +36,43 @@ class DisentangleZSL(Module):
         self.device = device
         return self
 
+    def reset_classifiers(self, nb_classes,  classifier_hiddens=(512, 1024,), cntx_classifier_hiddens=(512, 1024)):
+        self.nb_classes = nb_classes
+        self.classifier, _ = get_fc_net(self.pre_decoder_out_dim, classifier_hiddens, self.nb_classes, device=self.device)
+        self.cntx_classifier = nn.Sequential(GradientReversal(1),
+                                                get_fc_net(self.cntx_enc_dim, cntx_classifier_hiddens, self.nb_classes)[0]).to(self.device)
+
     def __init__(self,
-                 nb_attr,
                  nb_classes,
                  feats_dim=2048,
-                 attr_encode_dim=32,
-                 cntx_encode_dim=128,
-                 encoder_hiddens=(1024, 512),
-                 decoder_hiddens=(512, 1024),
-                 classifier_hiddens=(1024,),
+                 pre_encoder_units=(1024, 512),
+                 attr_encoder_units=(32,),
+                 cntx_encoder_units=(128,),
+                 pre_decoder_units=None,
+                 decoder_units=(512, 1024, 2048,),
+                 classifier_hiddens=(512, 1024,),
+                 cntx_classifier_hiddens=(512, 1024),
                  attr_regr_hiddens=(32,)):
         super().__init__()
         self.device = None
         self.feats_dim = feats_dim
         self.nb_classes = nb_classes
-        self.nb_attr = nb_attr
-        self.attr_enc_dim = attr_encode_dim
-        self.cntx_enc_dim = cntx_encode_dim
+        self.attr_enc_dim = attr_encoder_units[-1]
+        self.cntx_enc_dim = cntx_encoder_units[-1]
 
-        # ATTRIBUTE ENCODER #
-        self.pre_encoder = get_fc_net(self.feats_dim, encoder_hiddens)
-        self.attr_encoder = get_fc_net(encoder_hiddens[-1], None, self.attr_enc_dim*self.nb_attr)
-        self.cntx_encoder = get_fc_net(encoder_hiddens[-1], None, self.cntx_enc_dim)
-        self.decoder = get_fc_net(self.full_encoding_dim, decoder_hiddens, self.feats_dim)
-        self.classifier = get_fc_net(self.feats_dim, classifier_hiddens, self.nb_attr)
-        self.attr_regressors = get_1by1_conv1d_net(self.attr_enc_dim, attr_regr_hiddens, 1, out_activation=nn.Sigmoid)
+        # ENCODERS #
+        self.pre_encoder, pre_enc_out_dim = get_fc_net(self.feats_dim, pre_encoder_units)
+        self.attr_encoder, _ = get_fc_net(pre_enc_out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * self.nb_classes)
+        self.cntx_encoder, _ = get_fc_net(pre_enc_out_dim, cntx_encoder_units)
+
+        # ATTRIBUTE DECODER #
+        self.attr_decoder, _  = get_1by1_conv1d_net(self.attr_enc_dim, attr_regr_hiddens, 1, out_activation=nn.Sigmoid)
+
+        # FEATURE DECODER/CLASSIFIER #
+        self.pre_decoder, self.pre_decoder_out_dim = get_fc_net(self.full_encoding_dim, pre_decoder_units)
+        self.decoder, _ = get_fc_net(self.pre_decoder_out_dim, pre_decoder_units, self.feats_dim)
+        self.classifier, _ = get_fc_net(self.pre_decoder_out_dim, classifier_hiddens, self.nb_classes)
+        self.cntx_classifier = nn.Sequential(GradientReversal(1), get_fc_net(self.cntx_enc_dim, cntx_classifier_hiddens, self.nb_classes)[0])
 
     def mask_attr_enc(self, attr_enc, attributes):
         bs = attributes.shape[0]
@@ -98,26 +81,34 @@ class DisentangleZSL(Module):
         return attr_enc * A
 
     def encode(self, x):
-        pd = self.pre_encoder(x)
-        attr_enc = self.attr_encoder(pd)
-        cntx_enc = self.cntx_encoder(pd)
+        pe = self.pre_encoder(x)
+        attr_enc = self.attr_encoder(pe)
+        cntx_enc = self.cntx_encoder(pe)
         return attr_enc, cntx_enc
 
-    def decode(self, attr_enc, context_enc, attributes=None):
+    def pre_decode(self, attr_enc, context_enc, attributes=None):
         if attributes is not None:
             attr_enc = self.mask_attr_enc(attr_enc, attributes)
         concatenated = torch.cat([attr_enc, context_enc], dim=-1)
-        #concatenated = torch.cat([attr_enc, torch.zeros_like(context_enc)], dim=-1)
-        return self.decoder(concatenated)
+        # concatenated = torch.cat([attr_enc, torch.zeros_like(context_enc)], dim=-1)
+        return self.pre_decoder(concatenated)
 
-    def classify(self, feat):
-        return self.classifier(feat)
+    def decode(self, attr_enc, context_enc, attributes=None):
+        pre_decoded = self.pre_decode(attr_enc, context_enc, attributes)
+        return self.decoder(pre_decoded)
+
+    def classify_decode(self, attr_enc, context_enc, attributes=None):
+        pre_decoded = self.pre_decode(attr_enc, context_enc, attributes)
+        decoded = self.decoder(pre_decoded)
+        logits  = self.classifier(pre_decoded)
+        return logits, decoded
 
     def forward(self, x, a=None):
         attr_enc, cntx_enc = self.encode(x)
-        decoded = self.decode(attr_enc, cntx_enc, a)
-        logits = self.classify(decoded)
-        return decoded, logits, (attr_enc, cntx_enc)
+        logits, decoded = self.classify_decode(attr_enc, cntx_enc, a)
+        cntx_logits = self.cntx_classifier(cntx_enc)
+        return decoded, logits, cntx_logits, (attr_enc, cntx_enc)
+
 
     @staticmethod
     def reconstruction_loss(x, decoded):
@@ -139,37 +130,39 @@ class DisentangleZSL(Module):
         cntx_enc_exp = interlaced_repeat(cntx_enc, dim=0, times=nb_classes)
         #label_exp = interlaced_repeat(label, dim=0, times=nb_classes)
         all_attrs_exp = all_attrs.repeat([bs, 1])
-
-        decoded = self.decode(attr_enc_exp, cntx_enc_exp, all_attrs_exp)
-        logits = self.classify(decoded)
+        #
+        logits, decoded = self.classify_decode(attr_enc_exp, cntx_enc_exp, all_attrs_exp)
         t = torch.tensor([[t] for t in list(range(nb_classes)) * bs]).to(self.device)
         logits_diags = torch.gather(logits, 1, t).view(bs, nb_classes)
         return NN.cross_entropy(logits_diags/T, label)
 
     def reconstruct_attributes(self, attr_enc: torch.Tensor):
-        attr_enc = attr_enc.view([attr_enc.shape[0], self.attr_enc_dim, self.nb_attr])
-        reconstructed_attr = self.attr_regressors(attr_enc)
+        attr_enc = attr_enc.view([attr_enc.shape[0], self.attr_enc_dim, self.nb_classes])
+        reconstructed_attr = self.attr_decoder(attr_enc)
         return torch.squeeze(reconstructed_attr, dim=1)
 
     def train_step(self, X, Y, all_attrs, opt: Optimizer, T=1.):
         opt.zero_grad()
         attr = all_attrs[Y]
-        decoded, logits, (attr_enc, cntx_enc) = self.forward(X, attr)
+        decoded, logits, cntx_logits, (attr_enc, cntx_enc) = self.forward(X, attr)
         attr_reconstr = self.reconstruct_attributes(attr_enc)
 
         reconstruct_loss = NN.mse_loss(decoded, X) # NN.l1_loss(decoded,X)
         attr_reconstruct_loss = NN.l1_loss(attr_reconstr, attr)
         #attr_reconstruct_loss = torch.Tensor([0.]).to(self.device)
         classifier_loss = NN.cross_entropy(logits/T, Y)
+        cntx_classifier_loss = NN.cross_entropy(cntx_logits, Y)
+
         disentangle_loss = self.disentangle_loss(attr_enc, cntx_enc, Y, all_attrs, T)
 
-        loss = 10 * reconstruct_loss + \
+        loss = 100 * reconstruct_loss + \
                10 * attr_reconstruct_loss + \
                1 * classifier_loss + \
+               .1 * cntx_classifier_loss + \
                1 * disentangle_loss
         loss.backward()
         opt.step()
-        return reconstruct_loss, attr_reconstruct_loss, classifier_loss, disentangle_loss
+        return reconstruct_loss, attr_reconstruct_loss, classifier_loss, cntx_classifier_loss, disentangle_loss
 
 
     def generate_encs(self, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
@@ -184,7 +177,7 @@ class DisentangleZSL(Module):
             cntx_encoding.append(ce.detach().cpu())
         attr_encoding = torch.cat(attr_encoding)
         cntx_encoding = torch.cat(cntx_encoding)
-        attr_encoding = attr_encoding.view([attr_encoding.shape[0], self.nb_attr, self.attr_enc_dim])
+        attr_encoding = attr_encoding.view([attr_encoding.shape[0], self.nb_classes, self.attr_enc_dim])
 
         #for attr in test_attrs:
         gen_attr_encs = []
@@ -233,8 +226,7 @@ class DisentangleZSL(Module):
         all_attrs_exp = all_attrs.repeat([bs, 1])
         cntx_enc_exp = interlaced_repeat(cntx_enc, dim=0, times=nb_classes)
 
-        all_feats = self.decode(attr_enc_exp, cntx_enc_exp, all_attrs_exp)
-        logits = self.classify(all_feats)
+        logits, decoded = self.classify_decode(attr_enc_exp, cntx_enc_exp, all_attrs_exp)
         t = torch.tensor([[t] for t in list(range(nb_classes)) * bs]).to(self.device)
         logits_diags = torch.gather(logits, 1, t).view(bs, nb_classes)
         return logits_diags
@@ -247,7 +239,6 @@ class DisentangleZSL(Module):
         attr_enc, cntx_enc = self.encode(X)
         A = all_attrs[Y]
         #attr_enc_exp_masked = self.mask_attr_enc(attr_enc, A)
-        decoded = self.decode(attr_enc, cntx_enc, all_attrs)
-        logits = self.classify(decoded)
+        logits, decoded = self.classify_decode(attr_enc, cntx_enc, all_attrs)
         softmax = NN.softmax(logits, dim=1)
         return softmax

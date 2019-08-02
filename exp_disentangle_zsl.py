@@ -25,7 +25,7 @@ def init_weights(m: Module):
 
 def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
              attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_samples=30, nb_random_means=1, threshold=.5,
-             classifier_hiddens=(512,), generalized=None):
+             classifier_hiddens=(512,), generalized=None, lr=.001):
     if generalized is None:
        generalized = True if seen_test_dict is not None else False
 
@@ -61,10 +61,10 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
     ######## TRAINING NEW CLASSIFIER ###########
     adapt_net = deepcopy(net)
-    adapt_net.nb_classes = len(set(NP(unseen_gen_labels)))
-    adapt_net.classifier = get_fc_net(adapt_net.feats_dim, classifier_hiddens, adapt_net.nb_classes).to(net.device)
+    adapt_net.reset_classifiers(len(set(NP(unseen_gen_labels))), classifier_hiddens, classifier_hiddens)
+
     gen_loader = DataLoader(TensorDataset(unseen_gen_feats, unseen_gen_labels), batch_size=bs, num_workers=2, shuffle=True)
-    opt = torch.optim.Adam(adapt_net.classifier.parameters(), lr=.001)
+    opt = torch.optim.Adam(adapt_net.classifier.parameters(), lr=lr)
     for ep in range(nb_epochs):
         preds = []
         y_trues = []
@@ -72,7 +72,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         for X, Y in gen_loader:
             X, Y = X.to(device), Y.to(device)
             opt.zero_grad()
-            decoded, logits, _ = adapt_net.forward(X, A[Y])
+            decoded, logits, cntx_logits, _ = adapt_net.forward(X, A[Y])
             loss = NN.cross_entropy(logits, Y)
             loss.backward()
             opt.step()
@@ -111,7 +111,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
             #net_copy.enc_predict(attr_enc, cntx_enc, A)
 
             logits = adapt_net.predict(X, A)
-            _, logits2, _ = adapt_net.forward(X)
+            _, logits2, cntx_logits2, _ = adapt_net.forward(X)
             # logits1 = net_copy.classifier(X)
 
             l = NN.cross_entropy(logits, Y)
@@ -147,8 +147,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
 def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
              attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_samples=30, nb_random_means=1, threshold=.5,
-             classifier_hiddens=(512,), generalized=None):
-    #TODO: work in progress . . .
+             classifier_hiddens=(512,), generalized=None, lr=.001):
     if generalized is None:
        generalized = True if seen_test_dict is not None else False
 
@@ -170,7 +169,7 @@ def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
     if generalized:
         train_attr_encodings = []
         train_cntx_encodings = []
-        for X in DataLoader(TensorDataset(train_feats), batch_size=bs, num_workers=2):
+        for X in DataLoader(TensorDataset(train_feats), batch_size=bs, num_workers=2, shuffle=False):
             attr_enc, cntx_enc = net.encode(X[0].to(device))
             train_attr_encodings.append(attr_enc.detach().cpu())
             train_cntx_encodings.append(cntx_enc.detach().cpu())
@@ -183,10 +182,9 @@ def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
     ######## TRAINING NEW CLASSIFIER ###########
     adapt_net = deepcopy(net)
-    adapt_net.nb_classes = len(set(NP(gen_labels)))
-    adapt_net.classifier = get_fc_net(adapt_net.feats_dim, classifier_hiddens, adapt_net.nb_classes).to(net.device)
+    adapt_net.reset_classifiers(len(set(NP(gen_labels))), classifier_hiddens, classifier_hiddens)
     gen_loader = DataLoader(TensorDataset(gen_attr_encs, gen_cntx_encs, gen_attr, gen_labels), batch_size=bs, num_workers=2, shuffle=True)
-    opt = torch.optim.Adam(list(adapt_net.classifier.parameters()) + list(adapt_net.decoder.parameters()), lr=.001)
+    opt = torch.optim.Adam(list(adapt_net.classifier.parameters()) + list(adapt_net.pre_decoder.parameters()), lr=lr)
     for ep in range(nb_epochs):
         preds = []
         y_trues = []
@@ -195,8 +193,7 @@ def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
             attr_enc, cntx_enc, attr, Y = [t.to(device) for t in (attr_enc, cntx_enc, attr, Y)]
 
             opt.zero_grad()
-            decoded = adapt_net.decode(attr_enc, cntx_enc, attr)
-            logits = adapt_net.classify(decoded)
+            logits, _ = adapt_net.classify_decode(attr_enc, cntx_enc, attr)
             loss = NN.cross_entropy(logits, Y)
             loss.backward()
             opt.step()
@@ -240,7 +237,7 @@ def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
             #net_copy.enc_predict(attr_enc, cntx_enc, A)
 
             logits = adapt_net.predict(X, A)
-            _, logits2, _ = adapt_net.forward(X)
+            _, logits2, cntx_logits2, _ = adapt_net.forward(X)
             # logits1 = net_copy.classifier(X)
 
             l = NN.cross_entropy(logits, Y)
@@ -276,17 +273,19 @@ def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 DOWNLOAD_DATA = False
 PREPROCESS_DATA = False
 DATASET = 'AWA2'
-# ATTRS_KEY = 'class_attr_orig'
+#ATTRS_KEY = 'class_attr_bin'
 ATTRS_KEY = 'class_attr'
 
 def main():
 
     bs = 128
     nb_epochs = 100
-    first_test_epoch = 1
-    test_period = 1
-    nb_class_epochs = 10
-    generalized = True
+    first_test_epoch, test_period = 1, 1
+    nb_class_epochs = 3
+    generalized = False
+
+    adapt_lr = .0001
+    lr = .0001
 
     if DATASET.startswith('AWA'):
         nb_gen_samples = 200
@@ -309,10 +308,14 @@ def main():
     nb_train_classes = len(set(train['labels']))
     feats_dim = len(train['feats'][0])
 
-    net = DisentangleZSL(nb_attr=train[ATTRS_KEY].shape[1], nb_classes=nb_train_classes, feats_dim=feats_dim,
-                         attr_encode_dim=32, cntx_encode_dim=128,
-                         encoder_hiddens=(1024, 512), decoder_hiddens=(512, 1024), classifier_hiddens=None).to(device)
-    opt = torch.optim.Adam(net.parameters())
+    net = DisentangleZSL(nb_classes=train[ATTRS_KEY].shape[1], feats_dim=feats_dim,
+                         pre_encoder_units=(1024, 512),  attr_encoder_units=(32,), cntx_encoder_units=(128,),
+
+                         pre_decoder_units=(512,), decoder_units=(1024,2048),
+                         classifier_hiddens=(1024,), cntx_classifier_hiddens=(1024,),
+
+                         attr_regr_hiddens=(32,)).to(device)
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
 
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -334,15 +337,19 @@ def main():
     from progressbar import progressbar
     for ep in range(nb_epochs):
         reconstruction_loss = torch.zeros(len(train_loader))
+        attribute_rec_loss = torch.zeros(len(train_loader))
         classification_loss = torch.zeros(len(train_loader))
+        context_class_loss = torch.zeros(len(train_loader))
         disentangling_loss = torch.zeros(len(train_loader))
         for bi, (X, Y) in enumerate(progressbar(train_loader)):
             X = X.to(device)
             Y = Y.to(device)
 
-            rec_loss, attr_rec_loss, cls_loss, dis_loss = net.train_step(X, Y, A_train_all, opt, T=1)
+            rec_loss, attr_rec_loss, cls_loss, cntx_cls_loss, dis_loss = net.train_step(X, Y, A_train_all, opt, T=1)
             reconstruction_loss[bi] = rec_loss
+            attribute_rec_loss[bi] = attr_rec_loss
             classification_loss[bi] = cls_loss
+            context_class_loss[bi] = cntx_cls_loss
             disentangling_loss[bi] = dis_loss
 
         print(f"")
@@ -350,8 +357,9 @@ def main():
         print(f"Epoch {ep+1}/{nb_epochs} ended: ")
         print(f"=======================================================")
         print(f"Reconstruction Loss: {torch.mean(reconstruction_loss):2.6f}")
-        print(f"Attr Reconstr  Loss: {torch.mean(attr_rec_loss):2.6f}")
+        print(f"Attr Reconstr  Loss: {torch.mean(attribute_rec_loss):2.6f}")
         print(f"Classification Loss: {torch.mean(classification_loss):2.6f}")
+        print(f"Context Class  Loss: {torch.mean(context_class_loss):2.6f}")
         print(f"Disentangling  Loss: {torch.mean(disentangling_loss):2.6f}")
         print(f"=======================================================")
         print(f"\n\n\n\n")
@@ -363,11 +371,11 @@ def main():
             print(f"=========         STARTING  TEST        ===============")
             print(f"=======================================================")
 
-            run_test_old(net, train, test_unseen, test_seen,
+            run_test_new(net, train, test_unseen, test_seen,
                          nb_epochs=nb_class_epochs, nb_gen_samples=nb_gen_samples, nb_random_means=1,
                          threshold=np.mean(test_unseen[ATTRS_KEY]),
                          #threshold=50,
-                         classifier_hiddens=None)
+                         classifier_hiddens=None, lr=adapt_lr)
 
 
 if __name__ == '__main__':
