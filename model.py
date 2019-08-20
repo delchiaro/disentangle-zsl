@@ -141,7 +141,8 @@ class DisentangleZSL(Module):
         reconstructed_attr = self.attr_decoder(attr_enc)
         return torch.squeeze(reconstructed_attr, dim=1)
 
-    def train_step(self, X, Y, all_attrs, opt: Optimizer, T=1.):
+    def train_step(self, X, Y, all_attrs, opt: Optimizer, T=1.,
+                   rec_mul=100, attr_rec_mul=10, class_mul=1, cntx_class_mul=0, disent_mul=1):
         opt.zero_grad()
         attr = all_attrs[Y]
         decoded, logits, cntx_logits, (attr_enc, cntx_enc) = self.forward(X, attr)
@@ -155,11 +156,11 @@ class DisentangleZSL(Module):
 
         disentangle_loss = self.disentangle_loss(attr_enc, cntx_enc, Y, all_attrs, T)
 
-        loss = 100 * reconstruct_loss + \
-               10 * attr_reconstruct_loss + \
-               1 * classifier_loss + \
-               0 * cntx_classifier_loss + \
-               1 * disentangle_loss
+        loss = rec_mul * reconstruct_loss + \
+               attr_rec_mul * attr_reconstruct_loss + \
+               class_mul * classifier_loss + \
+               cntx_class_mul * cntx_classifier_loss + \
+               disent_mul * disentangle_loss
         loss.backward()
         opt.step()
         return reconstruct_loss, attr_reconstruct_loss, classifier_loss, cntx_classifier_loss, disentangle_loss

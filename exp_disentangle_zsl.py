@@ -24,8 +24,8 @@ def init_weights(m: Module):
     m.apply(_init_weights)
 
 def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
-             attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_samples=30, nb_random_means=1, threshold=.5,
-             classifier_hiddens=(512,), generalized=None, lr=.001):
+                 attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_class_samples=30, nb_random_means=1, threshold=.5,
+                 classifier_hiddens=(512,), generalized=None, nb_seen_class_samples=30, lr=.001):
     if generalized is None:
        generalized = True if seen_test_dict is not None else False
 
@@ -42,7 +42,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
     ######## DATA GENERATION/PREPARATION ###########
     device = net.device
 
-    unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_samples,
+    unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
                                                              threshold, nb_random_mean=nb_random_means, bs=bs)
     if generalized:
         train_labels_offset = int(sorted(set(unseen_gen_labels))[-1]) + 1
@@ -50,8 +50,22 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         seen_test_labels = torch.tensor(seen_test_labels).long() + train_labels_offset
         seen_test_feats = torch.tensor(seen_test_feats).float()
         A = torch.cat([unseen_attrs, seen_attrs]).float()
-        unseen_gen_feats = torch.cat([unseen_gen_feats, train_feats])
-        unseen_gen_labels = torch.cat([unseen_gen_labels, train_labels])
+
+        seen_classes = sorted(set(train_labels.numpy()))
+        chosen_train_feats = []
+        chosen_train_labels = []
+        for cls in seen_classes:
+            idx = torch.masked_select(torch.tensor(range(len(train_labels))), train_labels == cls)
+            perm = np.random.permutation(len(idx))
+            labels = train_labels[idx][perm][:nb_seen_class_samples]
+            feats = train_feats[idx][perm][:nb_seen_class_samples]
+            chosen_train_feats.append(feats)
+            chosen_train_labels.append(labels)
+
+        chosen_train_feats = torch.cat(chosen_train_feats)
+        chosen_train_labels = torch.cat(chosen_train_labels)
+        unseen_gen_feats = torch.cat([unseen_gen_feats, chosen_train_feats])
+        unseen_gen_labels = torch.cat([unseen_gen_labels, chosen_train_labels])
     else:
         A = unseen_attrs
     A = A.to(device)
@@ -274,7 +288,7 @@ def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
 DOWNLOAD_DATA = False
 PREPROCESS_DATA = False
-DATASET = 'AWA2'
+DATASET = 'AWA2' #'CUB'
 #ATTRS_KEY = 'class_attr_bin'
 ATTRS_KEY = 'class_attr'
 
@@ -283,18 +297,29 @@ def main():
     bs = 128
     nb_epochs = 100
     first_test_epoch, test_period = 3, 1
-    nb_class_epochs = 20
-    generalized = False
+    generalized = True
 
-    adapt_lr = .0002
-    lr = .00002
+
 
     if DATASET.startswith('AWA'):
-        nb_gen_samples = 200
+        nb_seen_class_samples = 12
+        nb_gen_class_samples = 400
+        adapt_lr = .0002
+        lr = .00002
+        nb_class_epochs = 30
+
+
     elif DATASET == 'CUB':
-        nb_gen_samples = 20  # 200
+        nb_seen_class_samples = 10
+        nb_gen_class_samples = 50  # 200
+        adapt_lr = .001
+        lr = .0002
+        nb_class_epochs = 50
+
+
     else:
-        nb_gen_samples = 20
+        nb_seen_class_samples = 10
+        nb_gen_class_samples = 50
 
     if DOWNLOAD_DATA:
         download_data()
@@ -315,10 +340,9 @@ def main():
 
                          pre_decoder_units=(512, 1024, 2048),
                          decoder_units=None,
-                         classifier_hiddens=(512,),
+                         classifier_hiddens=(1024, 512,),
 
                          cntx_classifier_hiddens=(1024,),
-
 
                          attr_regr_hiddens=(32,)).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=lr)
@@ -351,7 +375,13 @@ def main():
             X = X.to(device)
             Y = Y.to(device)
 
-            rec_loss, attr_rec_loss, cls_loss, cntx_cls_loss, dis_loss = net.train_step(X, Y, A_train_all, opt, T=1)
+            rec_loss, attr_rec_loss, cls_loss, cntx_cls_loss, dis_loss = net.train_step(X, Y, A_train_all, opt, T=1,
+                                                                                        rec_mul=200,
+                                                                                        attr_rec_mul=10,
+                                                                                        class_mul=1,
+                                                                                        cntx_class_mul=0,
+                                                                                        disent_mul=1
+                                                                                        )
             reconstruction_loss[bi] = rec_loss
             attribute_rec_loss[bi] = attr_rec_loss
             classification_loss[bi] = cls_loss
@@ -378,9 +408,10 @@ def main():
             print(f"=======================================================")
 
             run_test_old(net, train, test_unseen, test_seen,
-                         nb_epochs=nb_class_epochs, nb_gen_samples=nb_gen_samples, nb_random_means=1,
+                         nb_epochs=nb_class_epochs, nb_gen_class_samples=nb_gen_class_samples, nb_seen_class_samples=nb_seen_class_samples, nb_random_means=1,
                          threshold=np.mean(test_unseen[ATTRS_KEY]),
                          #threshold=50,
+
                          classifier_hiddens=None, lr=adapt_lr)
 
 
