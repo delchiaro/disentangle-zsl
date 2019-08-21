@@ -40,16 +40,20 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         seen_test_labels = torch.tensor(seen_test_dict['labels']).long()
 
     ######## DATA GENERATION/PREPARATION ###########
-    device = net.device
 
-    unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
-                                                             threshold, nb_random_mean=nb_random_means, bs=bs)
+
+
+    device = net.device
+    adapt_net = deepcopy(net)
+    A = unseen_attrs
     if generalized:
+        unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
+                                                                 threshold, nb_random_mean=nb_random_means, bs=bs)
         train_labels_offset = int(sorted(set(unseen_gen_labels))[-1]) + 1
         train_labels = torch.tensor(train_labels).long() + train_labels_offset
         seen_test_labels = torch.tensor(seen_test_labels).long() + train_labels_offset
         seen_test_feats = torch.tensor(seen_test_feats).float()
-        A = torch.cat([unseen_attrs, seen_attrs]).float()
+        A = torch.cat([A, seen_attrs]).float()
 
         seen_classes = sorted(set(train_labels.numpy()))
         chosen_train_feats = []
@@ -64,21 +68,29 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
         chosen_train_feats = torch.cat(chosen_train_feats)
         chosen_train_labels = torch.cat(chosen_train_labels)
-        unseen_gen_feats = torch.cat([unseen_gen_feats, chosen_train_feats])
-        unseen_gen_labels = torch.cat([unseen_gen_labels, chosen_train_labels])
-    else:
-        A = unseen_attrs
-    A = A.to(device)
-    unseen_gen_feats.float()
-    unseen_gen_labels.long()
+        unseen_gen_feats = torch.cat([unseen_gen_feats, chosen_train_feats]).float()
+        unseen_gen_labels = torch.cat([unseen_gen_labels, chosen_train_labels]).long()
+        dataset = TensorDataset(unseen_gen_feats, unseen_gen_labels)
 
+    else:
+        from infinitedataset import InfiniteDataset
+        dataset = InfiniteDataset(nb_gen_class_samples, net,
+                                  train_dict['feats'], train_dict['attr'], train_dict['attr_bin'], train_dict['class_attr_bin'])
+
+    gen_loader = DataLoader(dataset, batch_size=bs, num_workers=2, shuffle=True)
+    A = A.to(device)
+
+
+
+    ######## PREPARE NEW CLASSIFIER ###########
+    if generalized:
+        adapt_net.augment_classifiers(unseen_attrs.shape[0])
+        # adapt_net.reset_classifiers(A.shape[0])
+    else:
+        adapt_net.reset_classifiers(A.shape[0])
+    opt = torch.optim.Adam(adapt_net.classifier.parameters(), lr=lr)
 
     ######## TRAINING NEW CLASSIFIER ###########
-    adapt_net = deepcopy(net)
-    adapt_net.reset_classifiers(len(set(NP(unseen_gen_labels))), classifier_hiddens, classifier_hiddens)
-
-    gen_loader = DataLoader(TensorDataset(unseen_gen_feats, unseen_gen_labels), batch_size=bs, num_workers=2, shuffle=True)
-    opt = torch.optim.Adam(adapt_net.classifier.parameters(), lr=lr)
     for ep in range(nb_epochs):
         preds = []
         y_trues = []
@@ -142,7 +154,13 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         classifier_only_preds = torch.cat(classifier_only_preds)
         y_trues = torch.cat(y_trues)
         full_net_acc.append((y_trues == full_net_preds).float().mean())
-        classifier_only_acc.append((y_trues == classifier_only_preds).float().mean())
+
+        from sklearn import metrics
+        #mean_class_acc_1 = metrics.balanced_accuracy_score(NP(y_trues), NP(classifier_only_preds))
+        mean_class_acc = np.mean([metrics.recall_score(NP(y_trues), NP(classifier_only_preds), labels=[k], average=None) for k in sorted(set(NP(y_trues)))])
+        #mean_examples_acc = (y_trues == classifier_only_preds).float().mean()
+
+        classifier_only_acc.append(mean_class_acc)
         full_net_loss.append(torch.stack(full_net_losses).mean())
         classifier_only_loss.append(torch.stack(classifier_only_losses).mean())
 
@@ -296,17 +314,17 @@ def main():
 
     bs = 128
     nb_epochs = 100
-    first_test_epoch, test_period = 3, 1
-    generalized = True
+    first_test_epoch, test_period = 1, 1
+    generalized = False
 
 
 
     if DATASET.startswith('AWA'):
-        nb_seen_class_samples = 12
-        nb_gen_class_samples = 400
+        nb_seen_class_samples = 10
+        nb_gen_class_samples = 100
         adapt_lr = .0002
         lr = .00002
-        nb_class_epochs = 30
+        nb_class_epochs = 30 #30
 
 
     elif DATASET == 'CUB':
@@ -335,7 +353,8 @@ def main():
     nb_train_classes = len(set(train['labels']))
     feats_dim = len(train['feats'][0])
 
-    net = DisentangleZSL(nb_classes=train[ATTRS_KEY].shape[1], feats_dim=feats_dim,
+    nb_classes, nb_attributes = train[ATTRS_KEY].shape
+    net = DisentangleZSL(nb_classes, nb_attributes, feats_dim=feats_dim,
                          pre_encoder_units=(1024, 512),  attr_encoder_units=(32,), cntx_encoder_units=(128,),
 
                          pre_decoder_units=(512, 1024, 2048),

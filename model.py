@@ -28,7 +28,7 @@ def interlaced_repeat(x, dim, times):
 class DisentangleZSL(Module):
     @property
     def full_encoding_dim(self):
-        return self.nb_classes * self.attr_enc_dim + self.cntx_enc_dim
+        return self.nb_attributes * self.attr_enc_dim + self.cntx_enc_dim
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -36,14 +36,37 @@ class DisentangleZSL(Module):
         self.device = device
         return self
 
-    def reset_classifiers(self, nb_classes,  classifier_hiddens=(512, 1024,), cntx_classifier_hiddens=(512, 1024)):
+    def reset_classifiers(self, nb_classes):
         self.nb_classes = nb_classes
-        self.classifier, _ = get_fc_net(self.pre_decoder_out_dim, classifier_hiddens, self.nb_classes, device=self.device)
-        self.cntx_classifier = nn.Sequential(GradientReversal(1),
-                                                get_fc_net(self.cntx_enc_dim, cntx_classifier_hiddens, self.nb_classes)[0]).to(self.device)
+        self.classifier[-1] = nn.Linear(self.classifier[-1].in_features, nb_classes).to(self.device)
+        self.cntx_classifier[-1][-1] = nn.Linear(self.cntx_classifier[-1][-1].in_features, nb_classes).to(self.device)
+
+
+    def augment_classifiers(self, nb_new_classes):
+        self.nb_classes += nb_new_classes
+        bias = self.classifier[-1].bias.data.detach().cpu()
+        weight = self.classifier[-1].weight.data.detach().cpu()
+        augment_bias = torch.zeros([nb_new_classes])
+        augment_weight = torch.zeros([nb_new_classes, weight.shape[1]])
+        nn.init.xavier_uniform_(augment_weight) #torch.nn.init.xavier_uniform(augment_weight)
+        self.classifier[-1].weight = torch.nn.Parameter(torch.cat([weight, augment_weight]).to(self.device))
+        self.classifier[-1].bias = torch.nn.Parameter(torch.cat([bias, augment_bias]).to(self.device))
+        self.classifier[-1].out_features = self.nb_classes
+
+        bias = self.cntx_classifier[-1][-1].bias.data.detach().cpu()
+        weight = self.cntx_classifier[-1][-1].weight.data.detach().cpu()
+        augment_bias = torch.zeros([nb_new_classes])
+        augment_weight = torch.zeros([nb_new_classes, weight.shape[1]])
+        nn.init.xavier_uniform_(augment_weight)
+        self.cntx_classifier[-1][-1].weight = torch.nn.Parameter(torch.cat([weight, augment_weight]).to(self.device))
+        self.cntx_classifier[-1][-1].bias = torch.nn.Parameter(torch.cat([bias, augment_bias]).to(self.device))
+        self.cntx_classifier[-1][-1].out_features =  self.nb_classes
+
+
 
     def __init__(self,
                  nb_classes,
+                 nb_attributes,
                  feats_dim=2048,
                  pre_encoder_units=(1024, 512),
                  attr_encoder_units=(32,),
@@ -57,12 +80,13 @@ class DisentangleZSL(Module):
         self.device = None
         self.feats_dim = feats_dim
         self.nb_classes = nb_classes
+        self.nb_attributes = nb_attributes
         self.attr_enc_dim = attr_encoder_units[-1]
         self.cntx_enc_dim = cntx_encoder_units[-1]
 
         # ENCODERS #
         self.pre_encoder, pre_enc_out_dim = get_fc_net(self.feats_dim, pre_encoder_units)
-        self.attr_encoder, _ = get_fc_net(pre_enc_out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * self.nb_classes)
+        self.attr_encoder, _ = get_fc_net(pre_enc_out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * self.nb_attributes)
         self.cntx_encoder, _ = get_fc_net(pre_enc_out_dim, cntx_encoder_units)
 
         # ATTRIBUTE DECODER #
@@ -70,7 +94,7 @@ class DisentangleZSL(Module):
 
         # FEATURE DECODER/CLASSIFIER #
         self.pre_decoder, self.pre_decoder_out_dim = get_fc_net(self.full_encoding_dim, pre_decoder_units)
-        self.decoder, _ = get_fc_net(self.pre_decoder_out_dim, pre_decoder_units, self.feats_dim)
+        self.decoder, _ = get_fc_net(self.pre_decoder_out_dim, decoder_units, self.feats_dim)
         self.classifier, _ = get_fc_net(self.pre_decoder_out_dim, classifier_hiddens, self.nb_classes)
         self.cntx_classifier = nn.Sequential(GradientReversal(1), get_fc_net(self.cntx_enc_dim, cntx_classifier_hiddens, self.nb_classes)[0])
 
@@ -137,7 +161,7 @@ class DisentangleZSL(Module):
         return NN.cross_entropy(logits_diags/T, label)
 
     def reconstruct_attributes(self, attr_enc: torch.Tensor):
-        attr_enc = attr_enc.view([attr_enc.shape[0], self.attr_enc_dim, self.nb_classes])
+        attr_enc = attr_enc.view([attr_enc.shape[0], self.attr_enc_dim, self.nb_attributes])
         reconstructed_attr = self.attr_decoder(attr_enc)
         return torch.squeeze(reconstructed_attr, dim=1)
 
@@ -178,7 +202,7 @@ class DisentangleZSL(Module):
             cntx_encoding.append(ce.detach().cpu())
         attr_encoding = torch.cat(attr_encoding)
         cntx_encoding = torch.cat(cntx_encoding)
-        attr_encoding = attr_encoding.view([attr_encoding.shape[0], self.nb_classes, self.attr_enc_dim])
+        attr_encoding = attr_encoding.view([attr_encoding.shape[0], self.nb_attributes, self.attr_enc_dim])
 
         #for attr in test_attrs:
         gen_attr_encs = []
