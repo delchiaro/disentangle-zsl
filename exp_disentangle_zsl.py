@@ -13,7 +13,7 @@ from model import DisentangleZSL, get_fc_net
 from utils import init, set_seed, to_categorical, unison_shuffled_copies, NP
 from copy import deepcopy
 import numpy as np
-
+from infinitedataset import InfiniteDataset
 
 
 def _init_weights(m: Module):
@@ -25,6 +25,7 @@ def init_weights(m: Module):
 
 def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
                  attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_class_samples=30, nb_random_means=1, threshold=.5,
+                 use_infinite_dataset=True,
                  classifier_hiddens=(512,), generalized=None, nb_seen_class_samples=30, lr=.001):
     if generalized is None:
        generalized = True if seen_test_dict is not None else False
@@ -46,7 +47,10 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
     device = net.device
     adapt_net = deepcopy(net)
     A = unseen_attrs
+
+
     if generalized:
+        use_infinite_dataset = False
         unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
                                                                  threshold, nb_random_mean=nb_random_means, bs=bs)
         train_labels_offset = int(sorted(set(unseen_gen_labels))[-1]) + 1
@@ -68,15 +72,20 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
         chosen_train_feats = torch.cat(chosen_train_feats)
         chosen_train_labels = torch.cat(chosen_train_labels)
-        unseen_gen_feats = torch.cat([unseen_gen_feats, chosen_train_feats]).float()
-        unseen_gen_labels = torch.cat([unseen_gen_labels, chosen_train_labels]).long()
-        dataset = TensorDataset(unseen_gen_feats, unseen_gen_labels)
+        unseen_gen_feats = torch.cat([unseen_gen_feats, chosen_train_feats])
+        unseen_gen_labels = torch.cat([unseen_gen_labels, chosen_train_labels])
+        dataset = TensorDataset(unseen_gen_feats.float(), unseen_gen_labels.long())
 
     else:
-        from infinitedataset import InfiniteDataset
-        dataset = InfiniteDataset(nb_gen_class_samples, net,
-                                  train_dict['feats'], train_dict['attr'], train_dict['attr_bin'], train_dict['class_attr_bin'])
-
+        if use_infinite_dataset:
+            dataset = InfiniteDataset(int(nb_gen_class_samples*net.nb_attributes/bs), net,
+                                      train_dict['feats'], train_dict['labels'], train_dict['attr'], train_dict['attr_bin'],
+                                      unseen_test_dict['class_attr_bin'])
+        else:
+            unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
+                                                                     threshold, nb_random_mean=nb_random_means, bs=bs)
+            dataset = TensorDataset(unseen_gen_feats.float(), unseen_gen_labels.long())
+    
     gen_loader = DataLoader(dataset, batch_size=bs, num_workers=2, shuffle=True)
     A = A.to(device)
 
@@ -95,8 +104,13 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
         preds = []
         y_trues = []
         losses = []
-        for X, Y in gen_loader:
-            X, Y = X.to(device), Y.to(device)
+        for data in gen_loader:
+            if not use_infinite_dataset:
+                X, Y = data
+                X, Y = X.to(device), Y.to(device)
+            else:
+                attr_enc, cntx_enc, Y = (d.to(device) for d in data)
+                X = net.decode(attr_enc, cntx_enc, A[Y])
             opt.zero_grad()
             #decoded, logits, cntx_logits, _ = adapt_net.forward(X, A[Y])
             logits = adapt_net.classifier(X)
@@ -314,17 +328,17 @@ def main():
 
     bs = 128
     nb_epochs = 100
-    first_test_epoch, test_period = 1, 1
+    first_test_epoch, test_period = 3, 1
     generalized = False
-
+    use_infinite_dataset=True
 
 
     if DATASET.startswith('AWA'):
         nb_seen_class_samples = 10
-        nb_gen_class_samples = 100
+        nb_gen_class_samples = 400
         adapt_lr = .0002
-        lr = .00002
-        nb_class_epochs = 30 #30
+        lr = .000008
+        nb_class_epochs = 20 #30
 
 
     elif DATASET == 'CUB':
@@ -428,9 +442,9 @@ def main():
 
             run_test_old(net, train, test_unseen, test_seen,
                          nb_epochs=nb_class_epochs, nb_gen_class_samples=nb_gen_class_samples, nb_seen_class_samples=nb_seen_class_samples, nb_random_means=1,
-                         threshold=np.mean(test_unseen[ATTRS_KEY]),
+                         threshold=float(np.mean(test_unseen[ATTRS_KEY])),
                          #threshold=50,
-
+                        use_infinite_dataset=use_infinite_dataset,
                          classifier_hiddens=None, lr=adapt_lr)
 
 

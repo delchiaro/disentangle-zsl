@@ -111,6 +111,9 @@ class DisentangleZSL(Module):
         return attr_enc, cntx_enc
 
     def pre_decode(self, attr_enc, context_enc, attributes=None):
+        if len(attr_enc.shape) == 3:
+            # concatenate along first dimension if the attr_enc has 3 dimensions (i.e. when dim-1 represent the attr id)
+            attr_enc = attr_enc.view([attr_enc.shape[0], -1])
         if attributes is not None:
             attr_enc = self.mask_attr_enc(attr_enc, attributes)
         concatenated = torch.cat([attr_enc, context_enc], dim=-1)

@@ -2,9 +2,11 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from data import get_dataset
+from model import DisentangleZSL
+
 
 class InfiniteDataset(Dataset):
-    def __init__(self, len, model, train_feats, train_attrs, train_attrs_bin, test_attrs, **args):
+    def __init__(self, len, model: DisentangleZSL, train_feats, train_labels, train_attrs, train_attrs_bin, test_attrs, **args):
         super().__init__(**args)
         self._len = len
         self._model = model
@@ -14,7 +16,7 @@ class InfiniteDataset(Dataset):
         self._test_attrs = test_attrs
 
         # Extract attirbute embeddings for training set.
-        ds = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels']).long())
+        ds = TensorDataset(torch.tensor(train_feats).float(), torch.tensor(train_labels).long())
         dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=6, pin_memory=False, drop_last=False)
         attr_encoding = []
         cntx_encoding = []
@@ -26,12 +28,12 @@ class InfiniteDataset(Dataset):
         attr_encoding = torch.cat(attr_encoding)
         self._cntx_encoding = torch.cat(cntx_encoding)
         self._attr_encoding = attr_encoding.view([attr_encoding.shape[0],
-                                                  self._model.nb_attr,
+                                                  self._model.nb_attributes,
                                                   self._model.attr_enc_dim])
 
         # Find valid examples for each attribute.
         valid = []
-        for att in range(self._model.nb_attr):
+        for att in range(self._model.nb_attributes):
             valid.append(np.where(train_attrs_bin[:, att] == 1)[0])
         self._valid = valid
         
@@ -40,13 +42,21 @@ class InfiniteDataset(Dataset):
 
     def __getitem__(self, i):
         cls = np.random.randint(len(self._test_attrs))
-        attrs, = np.where(self._test_attrs[cls])
-        ret = np.zeros_like(self._attr_encoding[0])
-        for idx in attrs:
-            emb = self._valid[idx][np.random.randint(len(self._valid[idx]))]
-            ret[idx, :] = self._attr_encoding[emb, idx, :]
+        attr = self._test_attrs[cls]
+        attr_indices, = np.where(attr)
 
-        return (ret, cls)
+        random_cntx_enc = self._cntx_encoding[np.random.randint(len(self._cntx_encoding))]
+        frankenstein_attr_enc = np.zeros_like(self._attr_encoding[0])
+        for idx in attr_indices:
+            try:
+                emb = self._valid[idx][np.random.randint(len(self._valid[idx]))]
+            except ValueError as t:
+                # In this case there are no examples with this attribute
+                #t.with_traceback()
+                #raise t
+                continue
+            frankenstein_attr_enc[idx, :] = self._attr_encoding[emb, idx, :]
+        return frankenstein_attr_enc, random_cntx_enc, cls
 
 if __name__ == '__main__':
     net = torch.load('checkpoint.pt')
@@ -54,6 +64,7 @@ if __name__ == '__main__':
     ds = InfiniteDataset(100,
                          net,
                          train['feats'],
+                         train['labels'],
                          train['attr'],
                          train['attr_bin'],
                          test_unseen['class_attr_bin'])
