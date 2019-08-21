@@ -1,6 +1,6 @@
 from typing import Union, List, Tuple
 
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, ConcatDataset
 
 from data import get_dataset, normalize_dataset, preprocess_dataset, download_data
 import torch
@@ -23,10 +23,10 @@ def _init_weights(m: Module):
 def init_weights(m: Module):
     m.apply(_init_weights)
 
-def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
-                 attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_class_samples=30, nb_random_means=1, threshold=.5,
-                 use_infinite_dataset=True,
-                 classifier_hiddens=(512,), generalized=None, nb_seen_class_samples=30, lr=.001):
+def run_test(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
+             attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_class_samples=30, nb_random_means=1, threshold=.5,
+             use_infinite_dataset=True,
+             classifier_hiddens=(512,), generalized=None, nb_seen_class_samples=30, lr=.001):
     if generalized is None:
        generalized = True if seen_test_dict is not None else False
 
@@ -48,18 +48,17 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
     adapt_net = deepcopy(net)
     A = unseen_attrs
 
-
+    new_class_offset = 0
     if generalized:
         use_infinite_dataset = False
         unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
                                                                  threshold, nb_random_mean=nb_random_means, bs=bs)
-        train_labels_offset = int(sorted(set(unseen_gen_labels))[-1]) + 1
-        train_labels = torch.tensor(train_labels).long() + train_labels_offset
-        seen_test_labels = torch.tensor(seen_test_labels).long() + train_labels_offset
-        seen_test_feats = torch.tensor(seen_test_feats).float()
+        seen_classes = sorted(set(train_labels.numpy()))
+        new_class_offset = int(sorted(set(seen_classes))[-1]) + 1
+        unseen_gen_labels = unseen_gen_labels + new_class_offset
+
         A = torch.cat([A, seen_attrs]).float()
 
-        seen_classes = sorted(set(train_labels.numpy()))
         chosen_train_feats = []
         chosen_train_labels = []
         for cls in seen_classes:
@@ -85,7 +84,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
             unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
                                                                      threshold, nb_random_mean=nb_random_means, bs=bs)
             dataset = TensorDataset(unseen_gen_feats.float(), unseen_gen_labels.long())
-    
+
     gen_loader = DataLoader(dataset, batch_size=bs, num_workers=2, shuffle=True)
     A = A.to(device)
 
@@ -128,7 +127,7 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
     ######## TEST ON TEST-SET ###########
     unseen_test_feats = torch.tensor(unseen_test_feats).float()
-    unseen_test_labels = torch.tensor(unseen_test_labels).long()
+    unseen_test_labels = torch.tensor(unseen_test_labels).long() + new_class_offset
     dloaders = [DataLoader(TensorDataset(unseen_test_feats, unseen_test_labels), batch_size=bs, num_workers=2)]
     if generalized:
         dl_seen = DataLoader(TensorDataset(seen_test_feats, seen_test_labels), batch_size=bs, num_workers=2)
@@ -193,129 +192,6 @@ def run_test_old(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_di
 
 
 
-def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
-             attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_samples=30, nb_random_means=1, threshold=.5,
-             classifier_hiddens=(512,), generalized=None, lr=.001):
-    if generalized is None:
-       generalized = True if seen_test_dict is not None else False
-
-    train_feats = torch.tensor(train_dict['feats']).float()
-    train_labels = torch.tensor(train_dict['labels']).long()
-    seen_attrs = torch.tensor(train_dict[attrs_key]).float()
-    unseen_test_feats = torch.tensor( unseen_test_dict['feats']).float()
-    unseen_test_labels = torch.tensor(unseen_test_dict['labels']).long()
-    unseen_attrs = torch.tensor(unseen_test_dict[attrs_key]).float()
-    if seen_test_dict is not None:
-        seen_test_feats = torch.tensor(seen_test_dict['feats']).float()
-        seen_test_labels = torch.tensor(seen_test_dict['labels']).long()
-
-    ######## DATA GENERATION/PREPARATION ###########
-    device = net.device
-
-    gen_attr_encs, gen_cntx_encs, gen_attr, gen_labels = net.generate_encs(train_feats, seen_attrs, unseen_attrs, nb_gen_samples,
-                                                                           threshold, nb_random_mean=nb_random_means, bs=bs)
-    if generalized:
-        train_attr_encodings = []
-        train_cntx_encodings = []
-        for X in DataLoader(TensorDataset(train_feats), batch_size=bs, num_workers=2, shuffle=False):
-            attr_enc, cntx_enc = net.encode(X[0].to(device))
-            train_attr_encodings.append(attr_enc.detach().cpu())
-            train_cntx_encodings.append(cntx_enc.detach().cpu())
-        train_attr_encodings = torch.cat(train_attr_encodings)
-        train_cntx_encodings = torch.cat(train_cntx_encodings)
-        gen_attr_encs = torch.cat([gen_attr_encs, train_attr_encodings])
-        gen_cntx_encs = torch.cat([gen_cntx_encs, train_cntx_encodings])
-        gen_labels = torch.cat([gen_labels, train_labels])
-        gen_attr = torch.cat([gen_attr, seen_attrs[train_labels]])
-
-    ######## TRAINING NEW CLASSIFIER ###########
-    adapt_net = deepcopy(net)
-    adapt_net.reset_classifiers(len(set(NP(gen_labels))), classifier_hiddens, classifier_hiddens)
-    gen_loader = DataLoader(TensorDataset(gen_attr_encs, gen_cntx_encs, gen_attr, gen_labels), batch_size=bs, num_workers=2, shuffle=True)
-    opt = torch.optim.Adam(list(adapt_net.classifier.parameters()) + list(adapt_net.pre_decoder.parameters()), lr=lr)
-    for ep in range(nb_epochs):
-        preds = []
-        y_trues = []
-        losses = []
-        for attr_enc, cntx_enc, attr, Y in gen_loader:
-            attr_enc, cntx_enc, attr, Y = [t.to(device) for t in (attr_enc, cntx_enc, attr, Y)]
-
-            opt.zero_grad()
-            logits, _ = adapt_net.classify_decode(attr_enc, cntx_enc, attr)
-            loss = NN.cross_entropy(logits, Y)
-            loss.backward()
-            opt.step()
-            losses.append(loss.detach().cpu())
-            preds.append(logits.argmax(dim=1))
-            y_trues.append(Y)
-        preds = torch.cat(preds)
-        y_trues = torch.cat(y_trues)
-        acc = (y_trues == preds).float().mean()
-        losses = torch.stack(losses).mean()
-        print(f"Classifier adaptation - Epoch {ep + 1}/{nb_epochs}:   Loss={losses:1.5f}    Acc={acc:1.4f}")
-
-    ######## TEST ON TEST-SET ###########
-
-
-    unseen_test_feats = torch.tensor(unseen_test_feats).float()
-    unseen_test_labels = torch.tensor(unseen_test_labels).long()
-    dloaders = [DataLoader(TensorDataset(unseen_test_feats, unseen_test_labels), batch_size=bs, num_workers=2)]
-    A = unseen_attrs
-    if generalized:
-        dl_seen = DataLoader(TensorDataset(seen_test_feats, seen_test_labels), batch_size=bs, num_workers=2)
-        dloaders.append(dl_seen)
-        A = torch.cat([A, seen_attrs])
-    A = A.to(device)
-    accs = []
-    accs2 = []
-    losses = []
-    losses2 = []
-
-    for test_loader in dloaders:
-        preds = []
-        preds2 = []
-        y_trues = []
-        loss = []
-        loss2 = []
-        for X, Y in test_loader:
-            X = X.to(device)
-            Y = Y.to(device)
-            #decoded, logits, _ = net_copy.forward(X, A[Y]) # BUG HERE: I'm using label information during forward.
-
-            #net_copy.enc_predict(attr_enc, cntx_enc, A)
-
-            logits = adapt_net.predict(X, A)
-            _, logits2, cntx_logits2, _ = adapt_net.forward(X)
-            # logits1 = net_copy.classifier(X)
-
-            l = NN.cross_entropy(logits, Y)
-            loss.append(l.detach().cpu())
-            preds.append(logits.argmax(dim=1))
-
-            l2 = NN.cross_entropy(logits2, Y)
-            loss2.append(l2.detach().cpu())
-            preds2.append(logits2.argmax(dim=1))
-
-
-
-            y_trues.append(Y)
-        preds = torch.cat(preds)
-        preds2 = torch.cat(preds2)
-        y_trues = torch.cat(y_trues)
-        accs.append((y_trues == preds).float().mean())
-        accs2.append((y_trues == preds2).float().mean())
-        losses.append(torch.stack(loss).mean())
-        losses2.append(torch.stack(loss2).mean())
-
-    unseen_acc, unseen_loss = accs[0], losses[0]
-    print(f"\nClassifier adaptation - Final Test - Unseen:   Loss={unseen_loss:1.5f}    Acc={unseen_acc:1.4f}\n")
-    print(f"\nClassifier adaptation - Final Test - Unseen:   Loss={losses2[0]:1.5f}     Acc={accs2[0]:1.4f}\n")
-    if generalized:
-        seen_acc, seen_loss = accs[1], losses[1]
-        H_acc = 2 * (seen_acc * unseen_acc) /  (seen_acc + unseen_acc)
-        print(f"\n                                   -   Seen:   Loss={seen_loss:1.5f}    Acc={seen_acc:1.4f}\n")
-        print(f"\n                                   -      H:                  Acc={H_acc:1.4f}\n")
-
 #%%
 
 DOWNLOAD_DATA = False
@@ -329,16 +205,16 @@ def main():
     bs = 128
     nb_epochs = 100
     first_test_epoch, test_period = 3, 1
-    generalized = False
+    generalized = True
     use_infinite_dataset=True
 
 
     if DATASET.startswith('AWA'):
-        nb_seen_class_samples = 10
-        nb_gen_class_samples = 400
-        adapt_lr = .0002
+        nb_seen_class_samples = 5
+        nb_gen_class_samples = 200#400
+        adapt_lr = .0001 # .0002
         lr = .000008
-        nb_class_epochs = 20 #30
+        nb_class_epochs = 40 #20
 
 
     elif DATASET == 'CUB':
@@ -440,13 +316,153 @@ def main():
             print(f"=========         STARTING  TEST        ===============")
             print(f"=======================================================")
 
-            run_test_old(net, train, test_unseen, test_seen,
-                         nb_epochs=nb_class_epochs, nb_gen_class_samples=nb_gen_class_samples, nb_seen_class_samples=nb_seen_class_samples, nb_random_means=1,
-                         threshold=float(np.mean(test_unseen[ATTRS_KEY])),
-                         #threshold=50,
-                        use_infinite_dataset=use_infinite_dataset,
-                         classifier_hiddens=None, lr=adapt_lr)
+            run_test(net, train, test_unseen, test_seen,
+                     nb_epochs=nb_class_epochs, nb_gen_class_samples=nb_gen_class_samples, nb_seen_class_samples=nb_seen_class_samples, nb_random_means=1,
+                     threshold=float(np.mean(test_unseen[ATTRS_KEY])),
+                     #threshold=50,
+                     use_infinite_dataset=use_infinite_dataset,
+                     classifier_hiddens=None, lr=adapt_lr)
 
 
 if __name__ == '__main__':
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#%%
+# !!! Deprecated !!!
+# def run_test_new(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=None,
+#              attrs_key='class_attr', bs=128, nb_epochs= 10, nb_gen_samples=30, nb_random_means=1, threshold=.5,
+#              classifier_hiddens=(512,), generalized=None, lr=.001):
+#     if generalized is None:
+#        generalized = True if seen_test_dict is not None else False
+#
+#     train_feats = torch.tensor(train_dict['feats']).float()
+#     train_labels = torch.tensor(train_dict['labels']).long()
+#     seen_attrs = torch.tensor(train_dict[attrs_key]).float()
+#     unseen_test_feats = torch.tensor( unseen_test_dict['feats']).float()
+#     unseen_test_labels = torch.tensor(unseen_test_dict['labels']).long()
+#     unseen_attrs = torch.tensor(unseen_test_dict[attrs_key]).float()
+#     if seen_test_dict is not None:
+#         seen_test_feats = torch.tensor(seen_test_dict['feats']).float()
+#         seen_test_labels = torch.tensor(seen_test_dict['labels']).long()
+#
+#     ######## DATA GENERATION/PREPARATION ###########
+#     device = net.device
+#
+#     gen_attr_encs, gen_cntx_encs, gen_attr, gen_labels = net.generate_encs(train_feats, seen_attrs, unseen_attrs, nb_gen_samples,
+#                                                                            threshold, nb_random_mean=nb_random_means, bs=bs)
+#     if generalized:
+#         train_attr_encodings = []
+#         train_cntx_encodings = []
+#         for X in DataLoader(TensorDataset(train_feats), batch_size=bs, num_workers=2, shuffle=False):
+#             attr_enc, cntx_enc = net.encode(X[0].to(device))
+#             train_attr_encodings.append(attr_enc.detach().cpu())
+#             train_cntx_encodings.append(cntx_enc.detach().cpu())
+#         train_attr_encodings = torch.cat(train_attr_encodings)
+#         train_cntx_encodings = torch.cat(train_cntx_encodings)
+#         gen_attr_encs = torch.cat([gen_attr_encs, train_attr_encodings])
+#         gen_cntx_encs = torch.cat([gen_cntx_encs, train_cntx_encodings])
+#         gen_labels = torch.cat([gen_labels, train_labels])
+#         gen_attr = torch.cat([gen_attr, seen_attrs[train_labels]])
+#
+#     ######## TRAINING NEW CLASSIFIER ###########
+#     adapt_net = deepcopy(net)
+#     adapt_net.reset_classifiers(len(set(NP(gen_labels))), classifier_hiddens, classifier_hiddens)
+#     gen_loader = DataLoader(TensorDataset(gen_attr_encs, gen_cntx_encs, gen_attr, gen_labels), batch_size=bs, num_workers=2, shuffle=True)
+#     opt = torch.optim.Adam(list(adapt_net.classifier.parameters()) + list(adapt_net.pre_decoder.parameters()), lr=lr)
+#     for ep in range(nb_epochs):
+#         preds = []
+#         y_trues = []
+#         losses = []
+#         for attr_enc, cntx_enc, attr, Y in gen_loader:
+#             attr_enc, cntx_enc, attr, Y = [t.to(device) for t in (attr_enc, cntx_enc, attr, Y)]
+#
+#             opt.zero_grad()
+#             logits, _ = adapt_net.classify_decode(attr_enc, cntx_enc, attr)
+#             loss = NN.cross_entropy(logits, Y)
+#             loss.backward()
+#             opt.step()
+#             losses.append(loss.detach().cpu())
+#             preds.append(logits.argmax(dim=1))
+#             y_trues.append(Y)
+#         preds = torch.cat(preds)
+#         y_trues = torch.cat(y_trues)
+#         acc = (y_trues == preds).float().mean()
+#         losses = torch.stack(losses).mean()
+#         print(f"Classifier adaptation - Epoch {ep + 1}/{nb_epochs}:   Loss={losses:1.5f}    Acc={acc:1.4f}")
+#
+#     ######## TEST ON TEST-SET ###########
+#
+#
+#     unseen_test_feats = torch.tensor(unseen_test_feats).float()
+#     unseen_test_labels = torch.tensor(unseen_test_labels).long()
+#     dloaders = [DataLoader(TensorDataset(unseen_test_feats, unseen_test_labels), batch_size=bs, num_workers=2)]
+#     A = unseen_attrs
+#     if generalized:
+#         dl_seen = DataLoader(TensorDataset(seen_test_feats, seen_test_labels), batch_size=bs, num_workers=2)
+#         dloaders.append(dl_seen)
+#         A = torch.cat([A, seen_attrs])
+#     A = A.to(device)
+#     accs = []
+#     accs2 = []
+#     losses = []
+#     losses2 = []
+#
+#     for test_loader in dloaders:
+#         preds = []
+#         preds2 = []
+#         y_trues = []
+#         loss = []
+#         loss2 = []
+#         for X, Y in test_loader:
+#             X = X.to(device)
+#             Y = Y.to(device)
+#             #decoded, logits, _ = net_copy.forward(X, A[Y]) # BUG HERE: I'm using label information during forward.
+#
+#             #net_copy.enc_predict(attr_enc, cntx_enc, A)
+#
+#             logits = adapt_net.predict(X, A)
+#             _, logits2, cntx_logits2, _ = adapt_net.forward(X)
+#             # logits1 = net_copy.classifier(X)
+#
+#             l = NN.cross_entropy(logits, Y)
+#             loss.append(l.detach().cpu())
+#             preds.append(logits.argmax(dim=1))
+#
+#             l2 = NN.cross_entropy(logits2, Y)
+#             loss2.append(l2.detach().cpu())
+#             preds2.append(logits2.argmax(dim=1))
+#
+#
+#
+#             y_trues.append(Y)
+#         preds = torch.cat(preds)
+#         preds2 = torch.cat(preds2)
+#         y_trues = torch.cat(y_trues)
+#         accs.append((y_trues == preds).float().mean())
+#         accs2.append((y_trues == preds2).float().mean())
+#         losses.append(torch.stack(loss).mean())
+#         losses2.append(torch.stack(loss2).mean())
+#
+#     unseen_acc, unseen_loss = accs[0], losses[0]
+#     print(f"\nClassifier adaptation - Final Test - Unseen:   Loss={unseen_loss:1.5f}    Acc={unseen_acc:1.4f}\n")
+#     print(f"\nClassifier adaptation - Final Test - Unseen:   Loss={losses2[0]:1.5f}     Acc={accs2[0]:1.4f}\n")
+#     if generalized:
+#         seen_acc, seen_loss = accs[1], losses[1]
+#         H_acc = 2 * (seen_acc * unseen_acc) /  (seen_acc + unseen_acc)
+#         print(f"\n                                   -   Seen:   Loss={seen_loss:1.5f}    Acc={seen_acc:1.4f}\n")
+#         print(f"\n                                   -      H:                  Acc={H_acc:1.4f}\n")

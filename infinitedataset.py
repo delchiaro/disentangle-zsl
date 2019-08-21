@@ -6,7 +6,8 @@ from model import DisentangleZSL
 
 
 class InfiniteDataset(Dataset):
-    def __init__(self, len, model: DisentangleZSL, train_feats, train_labels, train_attrs, train_attrs_bin, test_attrs, **args):
+    def __init__(self, len, model: DisentangleZSL, train_feats, train_labels, train_attrs, train_attrs_bin, test_attrs,
+                 new_class_offset=0, **args):
         super().__init__(**args)
         self._len = len
         self._model = model
@@ -14,6 +15,7 @@ class InfiniteDataset(Dataset):
         self._train_attrs = train_attrs
         self._train_attrs_bin = train_attrs
         self._test_attrs = test_attrs
+        self._new_class_offset = new_class_offset
 
         # Extract attirbute embeddings for training set.
         ds = TensorDataset(torch.tensor(train_feats).float(), torch.tensor(train_labels).long())
@@ -56,7 +58,7 @@ class InfiniteDataset(Dataset):
                 #raise t
                 continue
             frankenstein_attr_enc[idx, :] = self._attr_encoding[emb, idx, :]
-        return frankenstein_attr_enc, random_cntx_enc, cls
+        return frankenstein_attr_enc, random_cntx_enc, cls+self._new_class_offset
 
 if __name__ == '__main__':
     net = torch.load('checkpoint.pt')
