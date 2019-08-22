@@ -4,6 +4,8 @@ from torch import nn
 from torch.nn import functional as NN
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, TensorDataset
+from torch.nn import functional as F
+import numpy as np
 
 from layers import get_fc_net, get_1by1_conv1d_net, GradientReversal
 
@@ -74,6 +76,7 @@ class DisentangleZSL(Module):
                  pre_decoder_units=None,
                  decoder_units=(512, 1024, 2048,),
                  classifier_hiddens=(512, 1024,),
+                 encoder_discr_hiddens=(512,),
                  cntx_classifier_hiddens=(512, 1024),
                  attr_regr_hiddens=(32,)):
         super().__init__()
@@ -97,6 +100,9 @@ class DisentangleZSL(Module):
         self.decoder, _ = get_fc_net(self.pre_decoder_out_dim, decoder_units, self.feats_dim)
         self.classifier, _ = get_fc_net(self.pre_decoder_out_dim, classifier_hiddens, self.nb_classes)
         self.cntx_classifier = nn.Sequential(GradientReversal(1), get_fc_net(self.cntx_enc_dim, cntx_classifier_hiddens, self.nb_classes)[0])
+
+
+
 
     def mask_attr_enc(self, attr_enc, attributes):
         bs = attributes.shape[0]
@@ -168,29 +174,33 @@ class DisentangleZSL(Module):
         reconstructed_attr = self.attr_decoder(attr_enc)
         return torch.squeeze(reconstructed_attr, dim=1)
 
-    def train_step(self, X, Y, all_attrs, opt: Optimizer, T=1.,
-                   rec_mul=100, attr_rec_mul=10, class_mul=1, cntx_class_mul=0, disent_mul=1):
-        opt.zero_grad()
+    def generate_frankenstain_attr_enc(self, attr_enc):
+        import numpy as np
+        attr_enc = attr_enc.view([attr_enc.shape[0], self.nb_attributes, -1])
+        perms = np.array([np.random.permutation(attr_enc.shape[0]) for _ in range(85)]).transpose([0, 1])
+        frnk_attr_enc = torch.stack([attr_enc[perms[k], k, :] for k in range(85)]).transpose(0, 1)
+        return frnk_attr_enc.contiguous().view([frnk_attr_enc.shape[0], -1])
+
+    def train_loss(self, X, Y, all_attrs, discriminator=None):
         attr = all_attrs[Y]
+
         decoded, logits, cntx_logits, (attr_enc, cntx_enc) = self.forward(X, attr)
         attr_reconstr = self.reconstruct_attributes(attr_enc)
 
-        reconstruct_loss = NN.mse_loss(decoded, X) # NN.l1_loss(decoded,X)
-        attr_reconstruct_loss = NN.l1_loss(attr_reconstr, attr)
+        reconstruction = NN.l1_loss(decoded, X) # NN.mse_loss(decoded, X)
+        attr_reconstruction = NN.l1_loss(attr_reconstr, attr)
         #attr_reconstruct_loss = torch.Tensor([0.]).to(self.device)
-        classifier_loss = NN.cross_entropy(logits/T, Y)
-        cntx_classifier_loss = NN.cross_entropy(cntx_logits, Y)
+        classification = NN.cross_entropy(logits, Y)
+        cntx_classification = NN.cross_entropy(cntx_logits, Y)
+        disentangle = self.disentangle_loss(attr_enc, cntx_enc, Y, all_attrs)
 
-        disentangle_loss = self.disentangle_loss(attr_enc, cntx_enc, Y, all_attrs, T)
+        discr_loss = 0
+        if discriminator is not None:
+            discriminator(attr_enc)
+            frnk_attr_enc = self.generate_frankenstain_attr_enc(attr_enc)
+            discr_loss = F.binary_cross_entropy_with_logits(self.encoder_discr(frnk_attr_enc), torch.zeros([frnk_attr_enc.shape[0], 1]))
 
-        loss = rec_mul * reconstruct_loss + \
-               attr_rec_mul * attr_reconstruct_loss + \
-               class_mul * classifier_loss + \
-               cntx_class_mul * cntx_classifier_loss + \
-               disent_mul * disentangle_loss
-        loss.backward()
-        opt.step()
-        return reconstruct_loss, attr_reconstruct_loss, classifier_loss, cntx_classifier_loss, disentangle_loss
+        return reconstruction, attr_reconstruction, classification, cntx_classification, disentangle, discr_loss
 
 
     def generate_encs(self, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):

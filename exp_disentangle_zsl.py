@@ -50,15 +50,21 @@ def run_test(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=N
 
     new_class_offset = 0
     if generalized:
-        use_infinite_dataset = False
-        unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
-                                                                 threshold, nb_random_mean=nb_random_means, bs=bs)
+        use_infinite_dataset=False
         seen_classes = sorted(set(train_labels.numpy()))
         new_class_offset = int(sorted(set(seen_classes))[-1]) + 1
-        unseen_gen_labels = unseen_gen_labels + new_class_offset
+        if use_infinite_dataset:
+            gen_dataset = InfiniteDataset(int(nb_gen_class_samples * net.nb_attributes / bs), net,
+                                          train_dict['feats'], train_dict['labels'], train_dict['attr'], train_dict['attr_bin'],
+                                          unseen_test_dict['class_attr_bin'], new_class_offset=new_class_offset)
+        else:
+            unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, nb_gen_class_samples,
+                                                                    threshold, nb_random_mean=nb_random_means, bs=bs)
+            unseen_gen_labels = unseen_gen_labels + new_class_offset
+            gen_dataset = TensorDataset(unseen_gen_feats.float(), unseen_gen_labels.long())
+
 
         A = torch.cat([A, seen_attrs]).float()
-
         chosen_train_feats = []
         chosen_train_labels = []
         for cls in seen_classes:
@@ -68,12 +74,11 @@ def run_test(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=N
             feats = train_feats[idx][perm][:nb_seen_class_samples]
             chosen_train_feats.append(feats)
             chosen_train_labels.append(labels)
-
         chosen_train_feats = torch.cat(chosen_train_feats)
         chosen_train_labels = torch.cat(chosen_train_labels)
-        unseen_gen_feats = torch.cat([unseen_gen_feats, chosen_train_feats])
-        unseen_gen_labels = torch.cat([unseen_gen_labels, chosen_train_labels])
-        dataset = TensorDataset(unseen_gen_feats.float(), unseen_gen_labels.long())
+        seen_dataset = TensorDataset(chosen_train_feats.float(), chosen_train_labels.long())
+
+        dataset = ConcatDataset([gen_dataset, seen_dataset])
 
     else:
         if use_infinite_dataset:
@@ -85,7 +90,7 @@ def run_test(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=N
                                                                      threshold, nb_random_mean=nb_random_means, bs=bs)
             dataset = TensorDataset(unseen_gen_feats.float(), unseen_gen_labels.long())
 
-    gen_loader = DataLoader(dataset, batch_size=bs, num_workers=2, shuffle=True)
+    data_loader = DataLoader(dataset, batch_size=bs, num_workers=2, shuffle=True)
     A = A.to(device)
 
 
@@ -103,7 +108,7 @@ def run_test(net: DisentangleZSL, train_dict, unseen_test_dict, seen_test_dict=N
         preds = []
         y_trues = []
         losses = []
-        for data in gen_loader:
+        for data in data_loader:
             if not use_infinite_dataset:
                 X, Y = data
                 X, Y = X.to(device), Y.to(device)
@@ -204,17 +209,17 @@ def main():
 
     bs = 128
     nb_epochs = 100
-    first_test_epoch, test_period = 3, 1
-    generalized = True
+    first_test_epoch, test_period = 1, 1
+    generalized = False
     use_infinite_dataset=True
 
 
     if DATASET.startswith('AWA'):
         nb_seen_class_samples = 5
-        nb_gen_class_samples = 200#400
-        adapt_lr = .0001 # .0002
+        nb_gen_class_samples = 1000#400
+        adapt_lr = .0002 # .0002
         lr = .000008
-        nb_class_epochs = 40 #20
+        nb_class_epochs = 4
 
 
     elif DATASET == 'CUB':
@@ -246,15 +251,16 @@ def main():
     nb_classes, nb_attributes = train[ATTRS_KEY].shape
     net = DisentangleZSL(nb_classes, nb_attributes, feats_dim=feats_dim,
                          pre_encoder_units=(1024, 512),  attr_encoder_units=(32,), cntx_encoder_units=(128,),
-
                          pre_decoder_units=(512, 1024, 2048),
                          decoder_units=None,
                          classifier_hiddens=(1024, 512,),
-
                          cntx_classifier_hiddens=(1024,),
-
                          attr_regr_hiddens=(32,)).to(device)
+    discriminator, _ = get_fc_net(net.nb_attributes*net.attr_enc_dim, [512], 1, device=device)
+    discriminator = None
+
     opt = torch.optim.Adam(net.parameters(), lr=lr)
+    discr_opt = torch.optim.Adam(discriminator.parameters(), lr=lr) if discriminator is not None else None
 
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -273,6 +279,7 @@ def main():
 
     A_train_all = torch.tensor(train[ATTRS_KEY]).float().to(device)
 
+    from torch.nn import functional as F
     from progressbar import progressbar
     for ep in range(nb_epochs):
         reconstruction_loss = torch.zeros(len(train_loader))
@@ -280,22 +287,65 @@ def main():
         classification_loss = torch.zeros(len(train_loader))
         context_class_loss = torch.zeros(len(train_loader))
         disentangling_loss = torch.zeros(len(train_loader))
+        g_discriminator_loss = torch.zeros(len(train_loader))
+        d_real_loss = torch.zeros(len(train_loader))
+        d_fake_loss = torch.zeros(len(train_loader))
         for bi, (X, Y) in enumerate(progressbar(train_loader)):
             X = X.to(device)
             Y = Y.to(device)
+            attr = A_train_all[Y]
+            zeros = torch.zeros([X.shape[0], 1]).to(net.device)
+            ones = torch.ones([X.shape[0], 1]).to(net.device)
 
-            rec_loss, attr_rec_loss, cls_loss, cntx_cls_loss, dis_loss = net.train_step(X, Y, A_train_all, opt, T=1,
-                                                                                        rec_mul=200,
-                                                                                        attr_rec_mul=10,
-                                                                                        class_mul=1,
-                                                                                        cntx_class_mul=0,
-                                                                                        disent_mul=1
-                                                                                        )
-            reconstruction_loss[bi] = rec_loss
-            attribute_rec_loss[bi] = attr_rec_loss
-            classification_loss[bi] = cls_loss
-            context_class_loss[bi] = cntx_cls_loss
-            disentangling_loss[bi] = dis_loss
+            #### TRAINING GENERATOR NET
+            opt.zero_grad()
+            # Forward
+            decoded, logits, cntx_logits, (attr_enc, cntx_enc) = net.forward(X, attr)
+            attr_reconstr = net.reconstruct_attributes(attr_enc)
+
+            # Computing Losses
+            l_reconstr = NN.l1_loss(decoded, X)  # NN.mse_loss(decoded, X)
+            l_attr_reconstr = NN.l1_loss(attr_reconstr, attr)
+            # attr_reconstruct_loss = torch.Tensor([0.]).to(self.device)
+            l_class = NN.cross_entropy(logits, Y)
+            l_cntx_class = NN.cross_entropy(cntx_logits, Y)
+            l_disentangle = net.disentangle_loss(attr_enc, cntx_enc, Y, A_train_all)
+            l_discr = 0
+
+            # Computing Discriminator Fooling Loss
+            if discriminator is not None:
+                frnk_attr_enc = net.generate_frankenstain_attr_enc(attr_enc)
+                l_discr = F.binary_cross_entropy_with_logits(discriminator(frnk_attr_enc), zeros)
+
+            loss = 1*l_reconstr + 1*l_attr_reconstr + 1*l_class + -1*l_cntx_class + 2*l_disentangle + 5*l_discr
+            loss.backward()
+            opt.step()
+            attr_enc = attr_enc.detach()
+
+            #### TRAINING DISCRIMINATOR NET
+            if discriminator is not None:
+                discr_opt.zero_grad()
+                #decoded, logits, cntx_logits, (attr_enc, cntx_enc) = net.forward(X, attr)
+                frnk_attr_enc = net.generate_frankenstain_attr_enc(attr_enc.detach())
+                zeros = torch.zeros([X.shape[0], 1]).to(net.device)
+                ones = torch.ones([X.shape[0], 1]).to(net.device)
+                l_discr_real = F.binary_cross_entropy_with_logits(discriminator(attr_enc), zeros)
+                l_discr_fake = F.binary_cross_entropy_with_logits(discriminator(frnk_attr_enc), ones)
+                dloss = (l_discr_real + l_discr_fake)/2
+                dloss.backward()
+                discr_opt.step()
+                discr_opt.zero_grad()
+                d_real_loss[bi] = l_discr_real
+                d_fake_loss[bi] = l_discr_fake
+
+            reconstruction_loss[bi] = l_reconstr
+            attribute_rec_loss[bi] = l_attr_reconstr
+            classification_loss[bi] = l_class
+            context_class_loss[bi] = l_cntx_class
+            disentangling_loss[bi] = l_disentangle
+            g_discriminator_loss[bi] = l_discr
+
+
 
         print(f"")
         print(f"=======================================================")
@@ -306,6 +356,10 @@ def main():
         print(f"Classification Loss: {torch.mean(classification_loss):2.6f}")
         print(f"Context Class  Loss: {torch.mean(context_class_loss):2.6f}")
         print(f"Disentangling  Loss: {torch.mean(disentangling_loss):2.6f}")
+        print(f"Discriminator  Loss: {torch.mean(g_discriminator_loss):2.6f}")
+        print(f"--------------------------------------------------------")
+        print(f"D real Loss:  {torch.mean(d_real_loss):2.6f}")
+        print(f"D fake Loss:  {torch.mean(d_fake_loss):2.6f}")
         print(f"=======================================================")
         print(f"\n\n\n\n")
 
