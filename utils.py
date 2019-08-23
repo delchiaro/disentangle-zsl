@@ -5,7 +5,6 @@ import random
 def NP(tensor):
     return tensor.detach().cpu().numpy()
 
-
 def unison_shuffled_copies(list_of_arrays):
     for a in list_of_arrays:
         assert len(a) == len(list_of_arrays[0])
