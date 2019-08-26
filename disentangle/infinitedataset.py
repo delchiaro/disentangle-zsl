@@ -2,11 +2,11 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from data import get_dataset
-from model import DisentangleZSL
+from .net import DisentangleNet
 
 
 class InfiniteDataset(Dataset):
-    def __init__(self, len, model: DisentangleZSL, train_feats, train_labels, train_attrs, train_attrs_bin, test_attrs,
+    def __init__(self, len, model: DisentangleNet, train_feats, train_labels, train_attrs, train_attrs_bin, test_attrs,
                  new_class_offset=0, **args):
         super().__init__(**args)
         self._len = len
