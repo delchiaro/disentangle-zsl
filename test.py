@@ -7,8 +7,7 @@ import torch.nn.functional as NN
 
 from disentangle.utils import JoinDataLoader, NP
 from disentangle.infinitedataset import InfiniteDataset
-from disentangle.net import DisentangleNet
-
+from disentangle.net import DisentangleNet, generate_feats
 
 
 def run_test(net: DisentangleNet, train_dict, unseen_test_dict, seen_test_dict=None,
@@ -73,7 +72,7 @@ def run_test(net: DisentangleNet, train_dict, unseen_test_dict, seen_test_dict=N
                                       train_dict['feats'], train_dict['labels'], train_dict['attr'], train_dict['attr_bin'],
                                       unseen_test_dict['class_attr_bin'])
         else:
-            unseen_gen_feats, unseen_gen_labels = net.generate_feats(train_feats, seen_attrs, unseen_attrs, perclass_gen_samples,
+            unseen_gen_feats, unseen_gen_labels = generate_feats(net, train_feats, seen_attrs, unseen_attrs, perclass_gen_samples,
                                                                      threshold=threshold, nb_random_mean=1, bs=bs)
             dataset = TensorDataset(unseen_gen_feats.float(), unseen_gen_labels.long())
         data_loader = DataLoader(dataset, batch_size=bs, num_workers=2, shuffle=True)
@@ -95,7 +94,7 @@ def run_test(net: DisentangleNet, train_dict, unseen_test_dict, seen_test_dict=N
         losses = []
         for data in data_loader:
             if use_infinite_dataset:
-                if use_infinite_dataset:
+                if generalized:
                     (attr_enc, cntx_enc, gen_Y), (X, Y) = data
                     attr_enc, cntx_enc, gen_Y, X, Y = (t.to(device) for t in [attr_enc, cntx_enc, gen_Y, X, Y])
                     gen_X = net.decode(attr_enc, cntx_enc, A[gen_Y])

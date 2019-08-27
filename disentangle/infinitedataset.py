@@ -58,6 +58,8 @@ class InfiniteDataset(Dataset):
                 #raise t
                 continue
             frankenstein_attr_enc[idx, :] = self._attr_encoding[emb, idx, :]
+
+        frankenstein_attr_enc = frankenstein_attr_enc.reshape(-1)
         return frankenstein_attr_enc, random_cntx_enc, cls+self._new_class_offset
 
 if __name__ == '__main__':

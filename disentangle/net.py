@@ -37,13 +37,15 @@ class DisentangleEncoder(Module):
     def out_dim(self):
         return self.nb_attr * self.attr_enc_dim + self.cntx_enc_dim
 
-    def forward(self, x):
-        return self.encode(x)
+    def forward(self, x, a=None):
+        return self.encode(x, a)
 
-    def encode(self, x):
+    def encode(self, x, a=None):
         pe = self.pre_encoder(x)
         attr_enc = self.attr_encoder(pe)
         cntx_enc = self.cntx_encoder(pe)
+        if a is not None:
+            attr_enc = self.apply_mask(attr_enc, a)
         return attr_enc, cntx_enc
 
     def full_encode(self, x, a=None):
@@ -116,20 +118,22 @@ class DisentangleNet(Module):
     def full_encoding_dim(self):
         return self.encoder.out_dim
 
-    def forward(self, x, a=None):
+    def forward(self, x, a):
         attr_enc, cntx_enc = self.encode(x)
-        decoded = self.decode(attr_enc, cntx_enc, a)
+        masked_attr_enc = self.encoder.apply_mask(attr_enc, a)
+        decoded = self.decode(masked_attr_enc, cntx_enc)
         logits  = self.classifier(decoded)
         cntx_logits = self.cntx_classifier(cntx_enc)
-        return decoded, logits, cntx_logits, (attr_enc, cntx_enc)
+        return attr_enc, masked_attr_enc, cntx_enc, decoded, logits, cntx_logits
+        #return decoded, logits, cntx_logits, (attr_enc, cntx_enc)
 
-    def encode(self, x):
-        return self.encoder(x)
+    def encode(self, x, a=None):
+        return self.encoder(x, a)
 
     def decode(self, attr_enc, context_enc, attributes=None):
-        attr_enc = self.encoder.to_mat(attr_enc) if len(attr_enc.shape) == 3 else attr_enc
-        masked_attr_enc = self.encoder.apply_mask(attr_enc, attributes)
-        full_enc = self.encoder.join(masked_attr_enc, context_enc)
+        if attributes is not None:
+            attr_enc = self.encoder.apply_mask(attr_enc, attributes)
+        full_enc = self.encoder.join(attr_enc, context_enc)
         return self.decoder(full_enc)
 
     def disentangle_loss(self, attr_enc, cntx_enc, label, all_attrs, T=1.):
@@ -202,8 +206,8 @@ class DisentangleNet(Module):
 
 
 
-def generate_frankenstain_attr_enc(net: DisentangleNet, attr_enc):
-    attr_enc_cube = net.encoder.to_cube(attr_enc)
+def generate_frankenstain_attr_enc(net: DisentangleNet, masked_attr_enc):
+    attr_enc_cube = net.encoder.to_cube(masked_attr_enc)
     perms = np.array([np.random.permutation(attr_enc_cube.shape[0]) for _ in range(85)]).transpose([0, 1])
     frnk_attr_enc = torch.stack([attr_enc_cube[perms[k], k, :] for k in range(85)]).transpose(0, 1)
     return frnk_attr_enc.contiguous().view([frnk_attr_enc.shape[0], -1])
@@ -255,7 +259,7 @@ def generate_encs(net: DisentangleNet, train_feats, train_attrs, test_attrs, nb_
 
 
 def generate_feats(net: DisentangleNet, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
-    gen_attr_encs, gen_cntx_encs, attrs, labels = net.generate_encs(train_feats, train_attrs, test_attrs,
+    gen_attr_encs, gen_cntx_encs, attrs, labels = generate_encs(net, train_feats, train_attrs, test_attrs,
                                                                     nb_gen_samples, threshold, nb_random_mean, bs)
     gen_feats = net.decode(gen_attr_encs.to(net.device), gen_cntx_encs.to(net.device), attrs.to(net.device)).detach().cpu()
     return gen_feats, labels
