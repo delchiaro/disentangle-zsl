@@ -78,7 +78,7 @@ class DisentangleEncoder(Module):
             2D attr_enc tensor with shape (BS, nb_attributes*attr_enc_dim) """
         return cube_attr_enc.view([cube_attr_enc.shape[0], self.nb_attr,  self.attr_enc_dim])
 
-class DisentangleNet(Module):
+class DisentangleGen(Module):
 
     def __init__(self,
                  nb_classes,
@@ -206,13 +206,13 @@ class DisentangleNet(Module):
 
 
 
-def generate_frankenstain_attr_enc(net: DisentangleNet, masked_attr_enc):
+def generate_frankenstain_attr_enc(net: DisentangleGen, masked_attr_enc):
     attr_enc_cube = net.encoder.to_cube(masked_attr_enc)
     perms = np.array([np.random.permutation(attr_enc_cube.shape[0]) for _ in range(85)]).transpose([0, 1])
     frnk_attr_enc = torch.stack([attr_enc_cube[perms[k], k, :] for k in range(85)]).transpose(0, 1)
     return frnk_attr_enc.contiguous().view([frnk_attr_enc.shape[0], -1])
 
-def generate_encs(net: DisentangleNet, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
+def generate_encs(net: DisentangleGen, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
     dl = DataLoader(TensorDataset(train_feats), batch_size=bs, shuffle=False)
     attr_enc = []
     cntx_enc = []
@@ -258,7 +258,7 @@ def generate_encs(net: DisentangleNet, train_feats, train_attrs, test_attrs, nb_
     return gen_attr_encs, gen_cntx_encs, attrs, labels
 
 
-def generate_feats(net: DisentangleNet, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
+def generate_feats(net: DisentangleGen, train_feats, train_attrs, test_attrs, nb_gen_samples=30, threshold=.5, nb_random_mean=1, bs=128):
     gen_attr_encs, gen_cntx_encs, attrs, labels = generate_encs(net, train_feats, train_attrs, test_attrs,
                                                                     nb_gen_samples, threshold, nb_random_mean, bs)
     gen_feats = net.decode(gen_attr_encs.to(net.device), gen_cntx_encs.to(net.device), attrs.to(net.device)).detach().cpu()

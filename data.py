@@ -99,18 +99,24 @@ def get_data(dataset, split):
     return data
 
 
-def get_dataset(dataset, use_valid=False, gzsl=False):
-    if use_valid:
-        train = get_data(dataset, 'train')
-        val = get_data(dataset, 'val')
-    else:
-        train = get_data(dataset, 'trainval')
-        val = None
-
+def get_dataset(dataset, use_valid=False, gzsl=False, mean_sub=True, std_norm=True):
+    train = get_data(dataset, 'train') if use_valid else get_data(dataset, 'trainval')
+    val = get_data(dataset, 'val') if use_valid else None
     test_unseen = get_data(dataset, 'test_unseen')
-    test_seen = None
-    if gzsl:
-        test_seen = get_data(dataset, 'test_seen')
+    test_seen = get_data(dataset, 'test_seen') if gzsl else None
+
+    mean = np.mean(train['feats'], axis=0)
+    std = np.std(train['feats'], axis=0)
+    if mean_sub:
+        train['feats'] = train['feats']-mean
+        test_unseen['feats'] = test_unseen['feats']-mean
+        val = val['feats']-mean if val is not None else None
+        test_seen = test_seen['feats']-mean if test_seen is not None else None
+    if std_norm:
+        train['feats'] = train['feats']/std
+        test_unseen['feats'] = test_unseen['feats']/std
+        val = val['feats']/std if val is not None else None
+        test_seen = test_seen['feats']/std if test_seen is not None else None
 
     return train, val, test_unseen, test_seen
 
