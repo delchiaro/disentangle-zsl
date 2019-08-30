@@ -9,7 +9,7 @@ class IdentityLayer(nn.Module):
         else:
             return x
 
-def get_fc_net(input_size: int, hidden_sizes: list, output_size: int = None, hidden_activations=nn.ReLU, out_activation=None, device=None):
+def get_fc_net(input_size: int, hidden_sizes: tuple, output_size: int = None, hidden_activations=nn.LeakyReLU(), out_activation=None, device=None):
     hidden_sizes = [] if hidden_sizes is None else hidden_sizes
     hidden_sizes = list(hidden_sizes) + ([output_size] if output_size is not None else [])
     if len(hidden_sizes) > 0:
@@ -17,7 +17,7 @@ def get_fc_net(input_size: int, hidden_sizes: list, output_size: int = None, hid
         prev_size = hidden_sizes[0]
         for size in hidden_sizes[1:]:
             if hidden_activations is not None:
-                layers.append(hidden_activations())
+                layers.append(hidden_activations)
             layers.append(nn.Linear(prev_size, size))
             prev_size = size
         if out_activation is not None:
@@ -27,9 +27,10 @@ def get_fc_net(input_size: int, hidden_sizes: list, output_size: int = None, hid
     else:
         net = IdentityLayer()
         out_dim = input_size
-    return net.to(device), out_dim
+    net.out_dim = out_dim
+    return net.to(device)
 
-def get_1by1_conv1d_net(in_channels: int, hidden_channels: list, output_channels: int = None, hidden_activations=nn.ReLU,
+def get_1by1_conv1d_net(in_channels: int, hidden_channels: tuple, output_channels: int = None, hidden_activations=nn.LeakyReLU(),
                         out_activation=None):
     hidden_channels = [] if hidden_channels is None else hidden_channels
     hidden_channels = list(hidden_channels) + ([output_channels] if output_channels is not None else [])
@@ -40,13 +41,16 @@ def get_1by1_conv1d_net(in_channels: int, hidden_channels: list, output_channels
             layers.append(nn.Conv1d(prev_channels, out_channels=channels, kernel_size=1, stride=1))
             prev_channels = channels
             if hidden_activations is not None:
-                layers.append(hidden_activations())
+                layers.append(hidden_activations)
         layers.append(nn.Conv1d(prev_channels, out_channels=hidden_channels[-1], kernel_size=1, stride=1))
         if out_activation is not None:
-            layers.append(out_activation())
-        return nn.Sequential(*layers), hidden_channels[-1]
+            layers.append(out_activation)
+        net = nn.Sequential(*layers)
+        net.out_channels = hidden_channels[-1]
     else:
-        return IdentityLayer(), in_channels
+        net = IdentityLayer()
+        net.out_channels = in_channels
+    return net
 
 
 

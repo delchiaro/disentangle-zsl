@@ -26,8 +26,10 @@ def main():
     generalized = False
     use_discriminator = False
 
-    adapt_lr = .0002  # .0002
-    lr =.000008 # .00001  #
+    adapt_lr = .0001  # .0002
+    lr =.00001
+    #lr =.000008
+    #lr = .0001
     #lr =.0002 # .00001  #
 
     train_cfg = TrainCfg(opt_fn=lambda p: Adam(p, lr=lr),
@@ -35,7 +37,7 @@ def main():
                          nb_epochs=100,
                          bs=128,
                          autoencoder_pretrain_epochs=0,
-                         test_epoch=1, test_period=1)
+                         test_epoch=1, test_period=2)
 
     test_cfg = TestCfg(adapt_epochs=3,
                        adapt_lr=adapt_lr,
@@ -53,7 +55,7 @@ def main():
         download_data()
     if PREPROCESS_DATA:
         preprocess_dataset(DATASET)
-    train, val, test_unseen, test_seen = get_dataset(DATASET, use_valid=False, gzsl=generalized, mean_sub=True, std_norm=True)
+    train, val, test_unseen, test_seen = get_dataset(DATASET, use_valid=False, gzsl=generalized, mean_sub=False, std_norm=False, l2_norm=False)
     feats_dim = len(train['feats'][0])
     nb_classes, nb_attributes = train[ATTRS_KEY].shape
 

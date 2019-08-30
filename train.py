@@ -65,6 +65,7 @@ def run_wgan_train(generator: DisentangleGen,
         reconstruction_loss = []
         attribute_rec_loss = []
         classification_loss = []
+        decoded_classification_loss = []
         context_class_loss = []
         disentangling_loss = []
         g_loss = []
@@ -86,7 +87,7 @@ def run_wgan_train(generator: DisentangleGen,
                 decoded = generator.decode(masked_attr_enc, cntx_enc)
                 attr_decoded = generator.reconstruct_attributes(masked_attr_enc)
                 l_reconstr = NN.mse_loss(decoded, X)
-                attr_l_reconstruct = NN.mse_loss(attr_decoded, attr)
+                attr_l_reconstruct = NN.l1_loss(attr_decoded, attr)
                 l = l_reconstr + attr_l_reconstruct
                 l.backward()
                 reconstruction_loss.append(l_reconstr.detach().cpu())
@@ -148,7 +149,7 @@ def run_wgan_train(generator: DisentangleGen,
 
                 # Forward
                 attr = A_train_all[Y]
-                attr_enc, masked_attr_enc, cntx_enc, decoded, logits, cntx_logits = generator.forward(X, attr)
+                attr_enc, masked_attr_enc, cntx_enc, decoded, decoded_logits, logits, cntx_logits = generator.forward(X, attr)
                 attr_reconstr = generator.reconstruct_attributes(masked_attr_enc)
 
 
@@ -165,12 +166,13 @@ def run_wgan_train(generator: DisentangleGen,
 
                 # Forward Losses
                 l_reconstr = NN.mse_loss(decoded, X)  # *X.shape[1]  # NN.mse_loss(decoded, X)
-                l_attr_reconstr = NN.mse_loss(attr_reconstr, attr)  # *attr.shape[1]
+                l_attr_reconstr = NN.l1_loss(attr_reconstr, attr)  # *attr.shape[1]
                 l_class = NN.cross_entropy(logits, Y)
+                l_decoded_class = NN.cross_entropy(decoded_logits, Y)
                 l_cntx_class = NN.cross_entropy(cntx_logits, Y)
                 l_disentangle = generator.disentangle_loss(attr_enc, cntx_enc, Y, A_train_all)
                 #l = 100*l_reconstr + 1* l_attr_reconstr + 1 * l_class + 2 * l_cntx_class + 2 * l_disentangle
-                l = 100*l_reconstr + 1* l_attr_reconstr + 1 * l_class + 0*l_cntx_class + 1 * l_disentangle
+                l = 10*l_reconstr + 10* l_attr_reconstr + 0 * l_class + 1 * l_decoded_class + 1*l_cntx_class + 1 * l_disentangle
                 l.backward()
 
                 opt.step()
@@ -179,6 +181,7 @@ def run_wgan_train(generator: DisentangleGen,
                 reconstruction_loss.append(l_reconstr.detach().cpu())
                 attribute_rec_loss.append(l_attr_reconstr.detach().cpu())
                 classification_loss.append(l_class.detach().cpu())
+                decoded_classification_loss.append(l_decoded_class.detach().cpu())
                 context_class_loss.append(l_cntx_class.detach().cpu())
                 disentangling_loss.append(l_disentangle.detach().cpu())
 
@@ -189,6 +192,7 @@ def run_wgan_train(generator: DisentangleGen,
         print(f"Reconstruction Loss: {torch.tensor(reconstruction_loss).mean():2.6f}   X-mean={X_mean:2.6f} X-std={X_std:2.6f}")
         print(f"Attr Reconstr  Loss: {torch.tensor(attribute_rec_loss).mean():2.6f}   A-mean={A_mean:2.6f} A-std={A_std:2.6f}")
         print(f"Classification Loss: {torch.tensor(classification_loss).mean():2.6f}")
+        print(f"Dec. Classif.  Loss: {torch.tensor(decoded_classification_loss).mean():2.6f}")
         print(f"Context Class  Loss: {torch.tensor(context_class_loss).mean():2.6f}")
         print(f"Disentangling  Loss: {torch.tensor(disentangling_loss).mean():2.6f}")
         if discriminator is not None:

@@ -8,7 +8,7 @@ import torch.nn.functional as NN
 
 
 from disentangle.utils import JoinDataLoader, NP
-from disentangle.infinitedataset import InfiniteDataset
+from disentangle.dataset_generator import InfiniteDataset
 from disentangle.net import DisentangleGen, generate_feats
 
 
@@ -47,8 +47,9 @@ def run_test(net: DisentangleGen, train_dict, zsl_unseen_test_dict, gzsl_seen_te
         new_class_offset = len(seen_attrs)
         if cfg.infinite_dataset:
             gen_dataset = InfiniteDataset(int(cfg.nb_gen_class_samples * nb_new_classes), net,
-                                          train_dict['feats'], train_dict['labels'], train_dict['attr'], train_dict['attr_bin'],
-                                          zsl_unseen_test_dict['class_attr_bin'], new_class_offset=new_class_offset)
+                                          train_dict['feats'], train_dict['labels'],
+                                          train_dict['attr_bin'], zsl_unseen_test_dict['class_attr_bin'],
+                                          new_class_offset=new_class_offset)
             seen_dataset = TensorDataset(train_feats.float(), train_labels.long())
             gen_loader = DataLoader(gen_dataset, cfg.adapt_bs, shuffle=True)
             seen_loader = DataLoader(seen_dataset, cfg.adapt_bs, shuffle=True)
@@ -80,8 +81,8 @@ def run_test(net: DisentangleGen, train_dict, zsl_unseen_test_dict, gzsl_seen_te
         new_class_offset = 0
         if cfg.infinite_dataset:
             dataset = InfiniteDataset(int(cfg.nb_gen_class_samples * nb_new_classes), net,
-                                      train_dict['feats'], train_dict['labels'], train_dict['attr'], train_dict['attr_bin'],
-                                      zsl_unseen_test_dict['class_attr_bin'])
+                                      train_dict['feats'], train_dict['labels'],
+                                      train_dict['attr_bin'], zsl_unseen_test_dict['class_attr_bin'])
         else:
             unseen_gen_feats, unseen_gen_labels = generate_feats(net, train_feats, seen_attrs, unseen_attrs, cfg.nb_gen_class_samples,
                                                                  threshold=cfg.threshold, nb_random_mean=1, bs=cfg.adapt_bs)
@@ -133,8 +134,8 @@ def run_test(net: DisentangleGen, train_dict, zsl_unseen_test_dict, gzsl_seen_te
         preds = torch.cat(preds)
         y_trues = torch.cat(y_trues)
         acc = (y_trues == preds).float().mean()
-        full_net_losses = torch.stack(losses).mean()
-        print(f"Classifier adaptation - Epoch {ep+1}/{cfg.adapt_epochs}:   Loss={full_net_losses:1.5f}    Acc={acc:1.4f}")
+        classifier_losses = torch.stack(losses).mean()
+        print(f"Classifier adaptation - Epoch {ep+1}/{cfg.adapt_epochs}:   Loss={classifier_losses:1.5f}    Acc={acc:1.4f}")
 
     ######## TEST ON TEST-SET ###########
     unseen_test_feats = torch.tensor(unseen_test_feats).float()
@@ -152,7 +153,7 @@ def run_test(net: DisentangleGen, train_dict, zsl_unseen_test_dict, gzsl_seen_te
         full_net_preds = []
         classifier_only_preds = []
         y_trues = []
-        full_net_losses = []
+        classifier_losses = []
         classifier_only_losses = []
         for X, Y in test_loader:
             X = X.to(device)

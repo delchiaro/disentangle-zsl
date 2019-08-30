@@ -29,9 +29,9 @@ class DisentangleEncoder(Module):
         self.nb_attr = nb_attributes
         self.attr_enc_dim = attr_encoder_units[-1]
         self.cntx_enc_dim = cntx_encoder_units[-1]
-        self.pre_encoder, pre_enc_out_dim = get_fc_net(in_features, pre_encoder_units)
-        self.attr_encoder, _ = get_fc_net(pre_enc_out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * nb_attributes)
-        self.cntx_encoder, _ = get_fc_net(pre_enc_out_dim, cntx_encoder_units)
+        self.pre_encoder = get_fc_net(in_features, pre_encoder_units, out_activation=nn.LeakyReLU())
+        self.attr_encoder = get_fc_net(self.pre_encoder.out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * nb_attributes)
+        self.cntx_encoder = get_fc_net(self.pre_encoder.out_dim, cntx_encoder_units)
 
     @property
     def out_dim(self):
@@ -76,7 +76,7 @@ class DisentangleEncoder(Module):
     def to_mat(self, cube_attr_enc):
         """ Transform back a 3D cube_attr_enc tensor with shape (BS, nb_attributes, attr_enc_dim) into the original
             2D attr_enc tensor with shape (BS, nb_attributes*attr_enc_dim) """
-        return cube_attr_enc.view([cube_attr_enc.shape[0], self.nb_attr,  self.attr_enc_dim])
+        return cube_attr_enc.view([cube_attr_enc.shape[0], self.nb_attr*self.attr_enc_dim])
 
 class DisentangleGen(Module):
 
@@ -108,10 +108,10 @@ class DisentangleGen(Module):
         self.cntx_enc_dim = cntx_encoder_units[-1]
 
         self.encoder = DisentangleEncoder(feats_dim, nb_attributes, encoder_units, attr_encoder_units, cntx_encoder_units)
-        self.decoder, _ = get_fc_net(self.full_encoding_dim, decoder_units, self.feats_dim)
-        self.classifier, _ = get_fc_net(self.feats_dim, classifier_hiddens, self.nb_classes)
-        self.cntx_classifier = nn.Sequential(GradientReversal(1), get_fc_net(self.cntx_enc_dim, cntx_classifier_hiddens, self.nb_classes)[0])
-        self.attr_decoder, _  = get_1by1_conv1d_net(self.attr_enc_dim, attr_regr_hiddens, 1, out_activation=nn.Sigmoid)
+        self.decoder = get_fc_net(self.full_encoding_dim, decoder_units, self.feats_dim)
+        self.classifier = get_fc_net(self.feats_dim, classifier_hiddens, self.nb_classes)
+        self.cntx_classifier = nn.Sequential(GradientReversal(1), get_fc_net(self.cntx_enc_dim, cntx_classifier_hiddens, self.nb_classes))
+        self.attr_decoder = get_1by1_conv1d_net(self.attr_enc_dim, attr_regr_hiddens, 1, out_activation=nn.Sigmoid())
 
 
     @property
@@ -122,9 +122,10 @@ class DisentangleGen(Module):
         attr_enc, cntx_enc = self.encode(x)
         masked_attr_enc = self.encoder.apply_mask(attr_enc, a)
         decoded = self.decode(masked_attr_enc, cntx_enc)
-        logits  = self.classifier(decoded)
+        decoded_logits = self.classifier(decoded)
+        logits = self.classifier(x)
         cntx_logits = self.cntx_classifier(cntx_enc)
-        return attr_enc, masked_attr_enc, cntx_enc, decoded, logits, cntx_logits
+        return attr_enc, masked_attr_enc, cntx_enc, decoded, decoded_logits, logits, cntx_logits
         #return decoded, logits, cntx_logits, (attr_enc, cntx_enc)
 
     def encode(self, x, a=None):
@@ -153,6 +154,7 @@ class DisentangleGen(Module):
     def reconstruct_attributes(self, attr_enc: torch.Tensor):
         cube_attr_enc = self.encoder.to_cube(attr_enc)
         cube_attr_enc = cube_attr_enc.transpose(1, 2)
+        #cube_attr_enc = attr_enc.view([attr_enc.shape[0], self.attr_enc_dim, self.nb_attributes])
         reconstructed_attr = self.attr_decoder(cube_attr_enc)
         return torch.squeeze(reconstructed_attr, dim=1)
 

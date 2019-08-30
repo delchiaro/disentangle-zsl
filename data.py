@@ -98,25 +98,44 @@ def get_data(dataset, split):
 
     return data
 
+def subtract_mean(d, k, mean):
+    if d is not None:
+        d[k] = d[k]-mean
+    return d
 
-def get_dataset(dataset, use_valid=False, gzsl=False, mean_sub=True, std_norm=True):
+def std_normalize(d, k, std):
+    if d is not None:
+        d[k] = d[k]/std
+    return d
+
+def l2_normalize(d, k):
+    if d is not None:
+        d[k] = d[k]-np.linalg.norm(d[k], ord=2, axis=0)
+    return d
+
+def get_dataset(dataset, use_valid=False, gzsl=False, mean_sub=False, std_norm=False, l2_norm=False):
     train = get_data(dataset, 'train') if use_valid else get_data(dataset, 'trainval')
     val = get_data(dataset, 'val') if use_valid else None
     test_unseen = get_data(dataset, 'test_unseen')
     test_seen = get_data(dataset, 'test_seen') if gzsl else None
 
-    mean = np.mean(train['feats'], axis=0)
-    std = np.std(train['feats'], axis=0)
     if mean_sub:
-        train['feats'] = train['feats']-mean
-        test_unseen['feats'] = test_unseen['feats']-mean
-        val = val['feats']-mean if val is not None else None
-        test_seen = test_seen['feats']-mean if test_seen is not None else None
+        mean = np.mean(train['feats'], axis=0)
+        train = subtract_mean(train, 'feats', mean)
+        test_unseen = subtract_mean(test_unseen, 'feats', mean)
+        val = subtract_mean(val, 'feats', mean)
+        test_seen = subtract_mean(test_seen, 'feats', mean)
     if std_norm:
-        train['feats'] = train['feats']/std
-        test_unseen['feats'] = test_unseen['feats']/std
-        val = val['feats']/std if val is not None else None
-        test_seen = test_seen['feats']/std if test_seen is not None else None
+        std = np.std(train['feats'], axis=0)
+        train = std_normalize(train, 'feats', std)
+        test_unseen = std_normalize(test_unseen, 'feats', std)
+        val = std_normalize(val, 'feats', std)
+        test_seen = std_normalize(test_seen, 'feats', std)
+    if l2_norm:
+        train = l2_normalize(train, 'feats')
+        test_unseen = l2_normalize(test_unseen, 'feats')
+        val = l2_normalize(val, 'feats')
+        test_seen = l2_normalize(test_seen, 'feats')
 
     return train, val, test_unseen, test_seen
 
