@@ -30,8 +30,10 @@ class DisentangleEncoder(Module):
         self.attr_enc_dim = attr_encoder_units[-1]
         self.cntx_enc_dim = cntx_encoder_units[-1]
         self.pre_encoder = get_fc_net(in_features, pre_encoder_units, out_activation=nn.LeakyReLU())
-        self.attr_encoder = get_fc_net(self.pre_encoder.out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * nb_attributes)
-        self.cntx_encoder = get_fc_net(self.pre_encoder.out_dim, cntx_encoder_units)
+        self.attr_encoder = get_fc_net(self.pre_encoder.out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * nb_attributes,
+                                       out_activation=nn.LeakyReLU())
+        self.cntx_encoder = get_fc_net(self.pre_encoder.out_dim, cntx_encoder_units,
+                                       out_activation=nn.LeakyReLU())
 
     @property
     def out_dim(self):

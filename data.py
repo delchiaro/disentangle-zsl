@@ -140,13 +140,18 @@ def get_dataset(dataset, use_valid=False, gzsl=False, mean_sub=False, std_norm=F
     return train, val, test_unseen, test_seen
 
 
-def normalize_dataset(train, val=None, test=None, feats_range=(0, 1)):
+def normalize_dataset(train, val=None, test_unseen=None, test_seen=None,
+                      keys=('feats', 'class_attr'),
+                      feats_range=(0, 1)):
     if feats_range is not None:
-        min_max_scaler = preprocessing.MinMaxScaler(feats_range)
-        train['feats'] = min_max_scaler.fit_transform(train['feats'])
-        if val is not None:
-            val['feats'] = min_max_scaler.transform(val['feats'])
-        if test is not None:
-            test['feats'] = min_max_scaler.transform(test['feats'])
-    return train, val, test
+        for key in keys:
+            min_max_scaler = preprocessing.MinMaxScaler(feats_range)
+            train[key] = min_max_scaler.fit_transform(train[key])
+            if val is not None:
+                val[key] = min_max_scaler.transform(val[key])
+            if test_unseen is not None:
+                test_unseen[key] = min_max_scaler.transform(test_unseen[key])
+            if test_seen is not None:
+                test_seen[key] = min_max_scaler.transform(test_seen[key])
+    return train, val, test_unseen, test_seen
 

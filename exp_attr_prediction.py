@@ -21,98 +21,45 @@ from utils import NP
 
 
 def run_test(net,
-             classifier_hiddens: tuple,
-             train_dict, zsl_unseen_test_dict,
-             nb_gen_class_samples=100,
-             adapt_epochs: int = 5,
-             adapt_lr: float = .0001,
+             zsl_unseen_test_dict,
              adapt_bs: int = 128,
-             use_infinite_dataset=True,
              device=None):
-    feats_dim = train_dict['feats'].shape[1]
-    nb_new_classes = len(zsl_unseen_test_dict['class_attr_bin'])
 
-
-    def test_on_test():
         unseen_test_feats = torch.tensor(zsl_unseen_test_dict['feats']).float()
         unseen_test_labels = torch.tensor(zsl_unseen_test_dict['labels']).long()
         dloader = DataLoader(TensorDataset(unseen_test_feats, unseen_test_labels), batch_size=adapt_bs, num_workers=2)
-        losses, preds, y_trues = [], [], []
+        preds, y_trues = [], []
+        all_attr = torch.tensor(zsl_unseen_test_dict['class_attr']).float().to(device)
+
+        predicted_attrs = []
         for X, Y in dloader:
-            X = X.to(device); Y = Y.to(device)
+            X = X.to(device)
+            (attr_enc, cntx_enc), (a1, a1_dis, a1_cntx) = net.forward(X)
+            dists = torch.cdist(a1, all_attr)
+            pred = torch.argmin(dists, 1)
 
-            # # Decode without attributes:
-            # attr_enc, cntx_enc = net.enc(X)
-            # X1 = net.x_decoder(torch.cat([attr_enc, cntx_enc], dim=1))
-            # logit = classifier(X1)
-            #
-            # Use original img-feats:
-            logit = classifier(X)
+            predicted_attrs.append(a1.detach().cpu())
+            y_trues.append(Y.detach().cpu())
+            preds.append(pred.detach().cpu())
 
-            # # Decode with ALL attributes and take diagonal logit:
-            # logit = net.classify_unseen_enc(classifier, X, torch.tensor(zsl_unseen_test_dict['class_attr_bin']).to(device), device)
-
-
-            loss = NN.cross_entropy(logit, Y)
-            losses.append(loss.detach().cpu()); preds.append(logit.argmax(dim=1)); y_trues.append(Y)
-
-        preds = torch.cat(preds); y_trues = torch.cat(y_trues); unseen_loss = torch.stack(losses).mean()
+        preds = torch.cat(preds); y_trues = torch.cat(y_trues)
         unseen_acc = np.mean([metrics.recall_score(NP(y_trues), NP(preds), labels=[k], average=None) for k in sorted(set(NP(y_trues)))])
-        return unseen_loss, unseen_acc
 
-    ######## DATA GENERATION/PREPARATION ###########
-    if use_infinite_dataset:
-        dataset = InfiniteDataset(nb_gen_class_samples * nb_new_classes, net.enc,
-                                  train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
-                                  zsl_unseen_test_dict['class_attr_bin'], device=device)
-    else:
-        dataset = FrankensteinDataset(nb_gen_class_samples, net.enc,
-                                      train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
-                                      zsl_unseen_test_dict['class_attr_bin'], device=device)
-    data_loader = DataLoader(dataset, batch_size=adapt_bs, num_workers=2, shuffle=True)
-
-    ######## PREPARE NEW CLASSIFIER ###########
-    classifier = get_fc_net(feats_dim, classifier_hiddens, output_size=nb_new_classes).to(device)
-    optim = torch.optim.Adam(classifier.parameters(), lr=adapt_lr)
-
-    ######## TRAINING NEW CLASSIFIER ###########
-    for ep in range(adapt_epochs):
-        preds = []
-        y_trues = []
-        losses = []
-        for data in data_loader:
-            attr_enc, cntx_enc, Y = data[0].to(device), data[1].to(device), data[2].to(device)
-            optim.zero_grad()
-            X = net.x_decoder(torch.cat([attr_enc, cntx_enc], dim=1))
-            logit = classifier(X)
-            loss = NN.cross_entropy(logit, Y)
-            loss.backward()
-            optim.step()
-            losses.append(loss.detach().cpu())
-            preds.append(logit.argmax(dim=1))
-            y_trues.append(Y)
-        preds = torch.cat(preds)
-        y_trues = torch.cat(y_trues)
-        acc = (y_trues == preds).float().mean()
-        classifier_losses = torch.stack(losses).mean()
-        unseen_loss, unseen_acc = test_on_test()
-        print(f"Classifier adaptation - Epoch {ep+1}/{adapt_epochs}:   Loss={classifier_losses:1.5f}    Acc={acc:1.4f}  -  uLoss={unseen_loss:1.5f}   uAcc={unseen_acc:1.5f}")
+        print(f"1-NN accuracy:  uAcc={unseen_acc:1.5f}")
 
 
 class Net(nn.Module):
     def __init__(self):
         super().__init__()
         in_features = 2048
-        pre_enc_units = (1024, 512)
-        attr_enc_units = (32,)
-        cntx_enc_units = (128,)
-        attr_dec_hiddens = (32,)
-        cntx_dec_hiddens = (128,)
-        x_dec_hiddens = (2048, 2048,)
+        pre_enc_units = (2048, 1024, 512)
+        attr_enc_units = (256, 64,)
+        cntx_enc_units = (256, 128, )
+        attr_dec_hiddens = (64, 32)
+        cntx_dec_hiddens = (128, 64, 32)
 
         attr_enc_dim = attr_enc_units[-1] * nb_attributes
         cntx_enc_dim = cntx_enc_units[-1]
-        full_enc_dim = attr_enc_dim + cntx_enc_dim
 
         self.enc = DisentangleEncoder(in_features, nb_attributes, pre_enc_units, attr_enc_units, cntx_enc_units)
         self.attr_decoder = get_1by1_conv1d_net(attr_enc_units[-1], attr_dec_hiddens, 1, out_activation=nn.Sigmoid())
@@ -121,42 +68,22 @@ class Net(nn.Module):
                                                                   out_activation=nn.Sigmoid()))
         self.cntx_decoder = nn.Sequential(GradientReversal(1),
                                           get_fc_net(cntx_enc_dim, cntx_dec_hiddens, nb_attributes, out_activation=nn.Sigmoid()))
-        self.x_decoder = get_fc_net(full_enc_dim, x_dec_hiddens, feats_dim, out_activation=nn.ReLU())
 
 
     def forward(self, x, a_bin=None):
         bs = x.shape[0]
         attr_enc, cntx_enc = self.enc(x)
-        if a_bin is not None:
-            mask = interlaced_repeat(a_bin, dim=1, times=self.enc.attr_enc_dim)
-            attr_enc = attr_enc*mask
+        # if a_bin is not None:
+        #     mask = interlaced_repeat(a_bin, dim=1, times=self.enc.attr_enc_dim)
+        #     attr_enc = attr_enc*mask
 
         attr_enc_tensor = attr_enc.view(bs, nb_attributes, -1).transpose(1, 2)
         a1 = self.attr_decoder(attr_enc_tensor).view(bs, -1)
         a1_dis = self.dis_attr_decoder(attr_enc_tensor).transpose(1, 2)
-        a1_ctx = self.cntx_decoder(cntx_enc)
-        full_enc = torch.cat([attr_enc, cntx_enc], dim=1)
-        x1 = self.x_decoder(full_enc)
-        return x1, a1, a1_dis, a1_ctx
+        a1_cntx = self.cntx_decoder(cntx_enc)
+        return (attr_enc, cntx_enc), (a1, a1_dis, a1_cntx)
 
-    def classify_unseen_enc(self, classifier, x, all_attrs_bin, device=None):
-        nb_classes = len(all_attrs_bin)
-        bs = x.shape[0]
 
-        attr_enc, cntx_enc = self.enc(x)
-        attr_enc_exp = interlaced_repeat(attr_enc, dim=0, times=nb_classes)
-        cntx_enc_exp = interlaced_repeat(cntx_enc, dim=0, times=nb_classes)
-
-        all_attrs_exp = all_attrs_bin.repeat([bs, 1])
-        mask = interlaced_repeat(all_attrs_exp, dim=1, times=self.enc.attr_enc_dim)
-        all_attr_exp_maksed = attr_enc_exp * mask.float()
-
-        full_enc = torch.cat([all_attr_exp_maksed, cntx_enc_exp], dim=1)
-        decoded = self.x_decoder(full_enc)
-        logits = classifier(decoded)
-        t = torch.tensor([[t] for t in list(range(nb_classes)) * bs]).to(device)
-        logits_diags = torch.gather(logits, 1, t).view(bs, nb_classes)
-        return logits_diags
 
 #%%
 
@@ -181,11 +108,16 @@ train, val, test_unseen, test_seen = normalize_dataset(train, val, test_unseen, 
 feats_dim = len(train['feats'][0])
 nb_classes, nb_attributes = train[ATTRS_KEY].shape
 
-
+classes = sorted(set(train['labels'].tolist()))
+cls_counters = []
+for cls in classes:
+    cls_counters.append(np.sum(train['labels'] == cls))
+cls_counters = torch.tensor(cls_counters).float().to(device)
+tot_examples = cls_counters.sum()
 #%%
 import torch.nn.functional as NN
 net = Net().to(device)
-opt = torch.optim.Adam(net.parameters(), lr=.00001)
+opt = torch.optim.Adam(net.parameters(), lr=.0004)
 
 train_dataset = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels']).long())
 train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=6, pin_memory=False, drop_last=False)
@@ -221,17 +153,15 @@ for ep in range(nb_epochs):
         a_bin = A_bin[y]
 
         net.zero_grad()
-        x1, a1, a1_dis, a1_cntx = net.forward(x, a_bin)
-        #x1, a1, a1_dis, a1_cntx = net.forward(x)
-
+        (attr_enc, cntx_enc), (a1, a1_dis, a1_cntx) = net.forward(x)
 
 
         a_dis = a[:,None,:].repeat(1, nb_attributes, 1)
         K = non_diag_idx[None, :,:].repeat(a.shape[0], 1, 1)
         a_dis = a_dis[:, non_diag_idx[0], non_diag_idx[1]].reshape(a.shape[0], nb_attributes, nb_attributes-1)
 
-        loss_x = NN.mse_loss(x1, x)
-
+        l_cls_weight = cls_counters[y]/tot_examples
+        #l_cls_weight = 1
         if ATTRS_KEY == 'class_attr_bin':
             loss_a = NN.binary_cross_entropy(a1, a)
             loss_a_cntx = torch.min(NN.binary_cross_entropy(a1_cntx, a),
@@ -240,26 +170,25 @@ for ep in range(nb_epochs):
                                                            a_dis.contiguous().view([a_dis.shape[0], -1])),
                                    random_a_dis_loss).mean()
         elif ATTRS_KEY == 'class_attr':
-            loss_a = NN.mse_loss(a1, a)
-            loss_a_cntx = NN.l1_loss(a1_cntx, a)
-            loss_a_dis = NN.l1_loss(a1_dis, a_dis)
+            loss_a = 100*(NN.mse_loss(a1, a, reduction='none').mean(dim=1) * l_cls_weight).mean()
+            loss_a_cntx = 100* (NN.mse_loss(a1_cntx, a, reduction='none').mean(dim=1)  * l_cls_weight).mean()
+            loss_a_dis = 100* (NN.mse_loss(a1_dis, a_dis, reduction='none').mean(dim=(1,2)) * l_cls_weight).mean()
         else:
             raise ValueError()
 
-        l = 1. *loss_x
-        l += 1.*loss_a
-        #l += 1.*loss_a_cntx
-        #l += 1.*loss_a_dis
+        l = .5*loss_a
+        l += .25*loss_a_cntx
+        l += .25*loss_a_dis
 
         l.backward()
         opt.step()
-        append_loss(L_x, loss_x); append_loss(L_a_dis, loss_a_dis); append_loss(L_a, loss_a); append_loss(L_a_cntx, loss_a_cntx)
+        #append_loss(L_x, loss_x);
+        append_loss(L_a_dis, loss_a_dis); append_loss(L_a, loss_a); append_loss(L_a_cntx, loss_a_cntx)
 
-    print(f"  - Loss x:       {torch.stack(L_x).mean():4.5f}")
+    #print(f"  - Loss x:       {torch.stack(L_x).mean():4.5f}")
     print(f"  - Loss a:       {torch.stack(L_a).mean():4.5f}")
     print(f"  - Loss a_dis:   {torch.stack(L_a_dis).mean():4.5f}")
     print(f"  - Loss a_cntx:  {torch.stack(L_a_cntx).mean():4.5f}")
     print("")
     if ep+1 >= 1:
-        run_test(net, (2048, 1024, 512,), train, test_unseen,
-                 nb_gen_class_samples=400, adapt_epochs=4, adapt_lr=.00004, adapt_bs=128, device=device)
+        run_test(net, test_unseen, device=device)
