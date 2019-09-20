@@ -1,6 +1,6 @@
 data/
-
-
+states/
+*.pt
 *.png
 
 
