@@ -52,11 +52,22 @@ def FrankensteinDataset(per_class_samples, encoder: DisentangleEncoder, train_fe
 
 
 class InfiniteDataset(Dataset):
-    def __init__(self, len, encoder: DisentangleEncoder, train_feats, train_labels, train_attrs_bin, test_attrs_bin,
+    def __init__(self, len, encoder_fn, train_feats, train_labels, train_attrs_bin, test_attrs_bin,
                  new_class_offset=0, device=None, **args):
+        """
+        :param len: dataset length
+        :param encoder_fn: function that take a batch of image features X and return two tensor containing attribute_embedding and context_embedding
+        :param train_feats:
+        :param train_labels:
+        :param train_attrs_bin:
+        :param test_attrs_bin:
+        :param new_class_offset:
+        :param device:
+        :param args:
+        """
         super().__init__(**args)
         self._len = len
-        self._encoder = encoder
+        self._encoder = encoder_fn
         self._train_feats = train_feats
         self._train_attrs = train_attrs_bin
         self._test_attrs = test_attrs_bin
@@ -67,7 +78,6 @@ class InfiniteDataset(Dataset):
         dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=6, pin_memory=False, drop_last=False)
         attr_encoding = []
         cntx_encoding = []
-        encoder.to(device)
         for X in dl:
             X = X[0].to(device)
             ae, ce = self._encoder(X)

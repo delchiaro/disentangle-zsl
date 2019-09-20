@@ -23,17 +23,18 @@ class DisentangleEncoder(Module):
                  nb_attributes,
                  pre_encoder_units=(1024, 512),
                  attr_encoder_units=(32,),
-                 cntx_encoder_units=(128,)):
+                 cntx_encoder_units=(128,),
+                 leak=.2):
         super().__init__()
         self.in_dim = in_features
         self.nb_attr = nb_attributes
         self.attr_enc_dim = attr_encoder_units[-1]
         self.cntx_enc_dim = cntx_encoder_units[-1]
-        self.pre_encoder = get_fc_net(in_features, pre_encoder_units, out_activation=nn.LeakyReLU())
+        self.pre_encoder = get_fc_net(in_features, pre_encoder_units, hidden_activations=nn.LeakyReLU(leak), out_activation=nn.ReLU())
         self.attr_encoder = get_fc_net(self.pre_encoder.out_dim, attr_encoder_units[:-1], attr_encoder_units[-1] * nb_attributes,
-                                       out_activation=nn.LeakyReLU())
+                                       hidden_activations=nn.LeakyReLU(leak), out_activation=nn.ReLU())
         self.cntx_encoder = get_fc_net(self.pre_encoder.out_dim, cntx_encoder_units,
-                                       out_activation=nn.LeakyReLU())
+                                       hidden_activations=nn.LeakyReLU(leak), out_activation=nn.ReLU())
 
     @property
     def out_dim(self):
@@ -139,7 +140,7 @@ class DisentangleGen(Module):
         full_enc = self.encoder.join(attr_enc, context_enc)
         return self.decoder(full_enc)
 
-    def disentangle_loss(self, attr_enc, cntx_enc, label, all_attrs, T=1.):
+    def disentangle_loss(self, attr_enc, cntx_enc, label, all_attrs):
         nb_classes = len(all_attrs)
         bs = len(attr_enc)
         attr_enc_exp = interlaced_repeat(attr_enc, dim=0, times=nb_classes)
@@ -151,7 +152,7 @@ class DisentangleGen(Module):
         logits = self.classifier(decoded)
         t = torch.tensor([[t] for t in list(range(nb_classes)) * bs]).to(self.device)
         logits_diags = torch.gather(logits, 1, t).view(bs, nb_classes)
-        return NN.cross_entropy(logits_diags/T, label)
+        return NN.cross_entropy(logits_diags, label)
 
     def reconstruct_attributes(self, attr_enc: torch.Tensor):
         cube_attr_enc = self.encoder.to_cube(attr_enc)

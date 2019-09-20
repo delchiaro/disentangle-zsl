@@ -6,7 +6,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from data import get_dataset, preprocess_dataset, download_data, normalize_dataset
 from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset
 
-from disentangle.layers import get_fc_net, GradientReversal, get_1by1_conv1d_net
+from disentangle.layers import get_fc_net, GradientReversal, get_1by1_conv1d_net, GradientReversalFunction
 from disentangle.net import DisentangleEncoder
 from disentangle.utils import interlaced_repeat
 from utils import init
@@ -98,30 +98,51 @@ def run_test(net,
         unseen_loss, unseen_acc = test_on_test()
         print(f"Classifier adaptation - Epoch {ep+1}/{adapt_epochs}:   Loss={classifier_losses:1.5f}    Acc={acc:1.4f}  -  uLoss={unseen_loss:1.5f}   uAcc={unseen_acc:1.5f}")
 
-
 class Net(nn.Module):
     def __init__(self):
         super().__init__()
         in_features = 2048
+
         pre_enc_units = (1024, 512)
-        attr_enc_units = (32,)
-        cntx_enc_units = (128,)
-        attr_dec_hiddens = (32,)
+        attr_enc_units = (256, 64)
+        cntx_enc_units = (256, 256)
+        enc_leak = .02
+
+        attr_dec_hiddens = (128,)
         cntx_dec_hiddens = (128,)
         x_dec_hiddens = (2048, 2048,)
+        dec_leak = .02
 
         attr_enc_dim = attr_enc_units[-1] * nb_attributes
         cntx_enc_dim = cntx_enc_units[-1]
         full_enc_dim = attr_enc_dim + cntx_enc_dim
 
-        self.enc = DisentangleEncoder(in_features, nb_attributes, pre_enc_units, attr_enc_units, cntx_enc_units)
-        self.attr_decoder = get_1by1_conv1d_net(attr_enc_units[-1], attr_dec_hiddens, 1, out_activation=nn.Sigmoid())
-        self.dis_attr_decoder = nn.Sequential(GradientReversal(1),
-                                              get_1by1_conv1d_net(attr_enc_units[-1], attr_dec_hiddens, nb_attributes-1,
-                                                                  out_activation=nn.Sigmoid()))
-        self.cntx_decoder = nn.Sequential(GradientReversal(1),
-                                          get_fc_net(cntx_enc_dim, cntx_dec_hiddens, nb_attributes, out_activation=nn.Sigmoid()))
-        self.x_decoder = get_fc_net(full_enc_dim, x_dec_hiddens, feats_dim, out_activation=nn.ReLU())
+        self.enc = DisentangleEncoder(in_features, nb_attributes, pre_enc_units, attr_enc_units, cntx_enc_units, leak=enc_leak)
+
+        # self.attr_decoder = get_1by1_conv1d_net(attr_enc_units[-1], attr_dec_hiddens, 1, out_activation=nn.Sigmoid())
+        # self.dis_attr_decoder = nn.Sequential(GradientReversal(1),
+        #                                       get_1by1_conv1d_net(attr_enc_units[-1], attr_dec_hiddens, nb_attributes-1,
+        #                                                           out_activation=nn.Sigmoid()))
+
+        # Use a single decoder to decode from each attribute-embedding the full attribute vector.
+        # The output will be an nb_attr*nb_attr matrix and we should reverse the gradient for all the non-diagonal predictions!
+        self.attr_decoder = get_1by1_conv1d_net(attr_enc_units[-1], attr_dec_hiddens, nb_attributes,
+                                                hidden_activations=nn.LeakyReLU(dec_leak),
+                                                #out_activation=nn.Sigmoid()
+                                                #out_activation=nn.Tanhshrink(0, 1)
+                                                out_activation=nn.LeakyReLU(.02)
+                                                )
+
+
+        self.cntx_decoder = get_fc_net(cntx_enc_dim, cntx_dec_hiddens, nb_attributes,
+                                       hidden_activations=nn.LeakyReLU(dec_leak),
+                                       # out_activation=nn.Sigmoid()
+                                       # out_activation=nn.Tanhshrink(0, 1)
+                                       out_activation=nn.LeakyReLU(.02)
+                                       )
+
+        self.x_decoder = get_fc_net(full_enc_dim, x_dec_hiddens, feats_dim,
+                                    hidden_activations=nn.LeakyReLU(dec_leak), out_activation=nn.ReLU())
 
 
     def forward(self, x, a_bin=None):
@@ -132,12 +153,15 @@ class Net(nn.Module):
             attr_enc = attr_enc*mask
 
         attr_enc_tensor = attr_enc.view(bs, nb_attributes, -1).transpose(1, 2)
-        a1 = self.attr_decoder(attr_enc_tensor).view(bs, -1)
-        a1_dis = self.dis_attr_decoder(attr_enc_tensor).transpose(1, 2)
+        # a1 = self.attr_decoder(attr_enc_tensor).view(bs, -1)
+        # a1_dis = self.dis_attr_decoder(attr_enc_tensor).transpose(1, 2)
+
+        A = self.attr_decoder(attr_enc_tensor).transpose(1,2)
+
         a1_ctx = self.cntx_decoder(cntx_enc)
         full_enc = torch.cat([attr_enc, cntx_enc], dim=1)
         x1 = self.x_decoder(full_enc)
-        return x1, a1, a1_dis, a1_ctx
+        return x1, A, a1_ctx
 
     def classify_unseen_enc(self, classifier, x, all_attrs_bin, device=None):
         nb_classes = len(all_attrs_bin)
@@ -163,7 +187,9 @@ class Net(nn.Module):
 ################### CONFIGURATIONS
 DOWNLOAD_DATA = False
 PREPROCESS_DATA = False
-DATASET = 'AWA2'  # 'CUB'
+#DATASET = 'AWA2'  # 'CUB'
+DATASET = 'CUB'  # 'CUB'
+
 ATTRS_KEY = 'class_attr' # 'class_attr_bin'
 #ATTRS_KEY = 'class_attr_bin' # 'class_attr_bin'
 device = init(gpu_index=0, seed=42)
@@ -185,7 +211,7 @@ nb_classes, nb_attributes = train[ATTRS_KEY].shape
 #%%
 import torch.nn.functional as NN
 net = Net().to(device)
-opt = torch.optim.Adam(net.parameters(), lr=.00001)
+opt = torch.optim.Adam(net.parameters(), lr=.0001)
 
 train_dataset = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels']).long())
 train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=6, pin_memory=False, drop_last=False)
@@ -202,13 +228,14 @@ def non_diag_indices(rows_cols):
     all_idx = SortedSet([tuple(l) for l in torch.triu_indices(rows_cols, rows_cols, -rows_cols).transpose(0, 1).numpy().tolist()])
     non_diag_idx = all_idx.difference(diag_idx)
     non_diag_idx = torch.Tensor(non_diag_idx).transpose(0, 1).long()
-    return non_diag_idx
+    diag_idx = torch.Tensor(diag_idx).transpose(0, 1).long()
+    return non_diag_idx, diag_idx
 
 
 # run_test(net, (2048, 1024, 512,), train, test_unseen,
 #          nb_gen_class_samples=200, adapt_epochs=4, adapt_lr=.0001, adapt_bs=128, device=device)
 
-non_diag_idx = non_diag_indices(nb_attributes)
+non_diag_idx, diag_idx = non_diag_indices(nb_attributes)
 random_a_cntx_loss = torch.log(torch.tensor([nb_attributes]).float()).to(device)
 random_a_dis_loss = torch.log(torch.tensor([nb_attributes*(nb_attributes-1)]).float()).to(device)
 
@@ -221,35 +248,38 @@ for ep in range(nb_epochs):
         a_bin = A_bin[y]
 
         net.zero_grad()
-        x1, a1, a1_dis, a1_cntx = net.forward(x, a_bin)
+
+        a_dis = a[:, None, :].repeat(1, nb_attributes, 1)
+        K = non_diag_idx[None, :, :].repeat(a.shape[0], 1, 1)
+        a_dis = a_dis[:, non_diag_idx[0], non_diag_idx[1]].reshape(a.shape[0], nb_attributes, nb_attributes - 1)
+
         #x1, a1, a1_dis, a1_cntx = net.forward(x)
 
+        x1, a1_mat, a1_cntx = net.forward(x, a_bin)
+        a1 = a1_mat[:, diag_idx[0], diag_idx[1]]
+        a1_dis = a1_mat[:, non_diag_idx[0], non_diag_idx[1]].reshape(a.shape[0], nb_attributes, nb_attributes - 1)
 
-
-        a_dis = a[:,None,:].repeat(1, nb_attributes, 1)
-        K = non_diag_idx[None, :,:].repeat(a.shape[0], 1, 1)
-        a_dis = a_dis[:, non_diag_idx[0], non_diag_idx[1]].reshape(a.shape[0], nb_attributes, nb_attributes-1)
-
-        loss_x = NN.mse_loss(x1, x)
+        a1_dis = GradientReversalFunction.apply(a1_dis, 1)
+        a1_cntx = GradientReversalFunction.apply(a1_cntx, 1)
 
         if ATTRS_KEY == 'class_attr_bin':
             loss_a = NN.binary_cross_entropy(a1, a)
-            loss_a_cntx = torch.min(NN.binary_cross_entropy(a1_cntx, a),
-                                    random_a_cntx_loss).mean()
+            loss_a_cntx = torch.min(NN.binary_cross_entropy(a1_cntx, a), random_a_cntx_loss).mean()
             loss_a_dis = torch.min(NN.binary_cross_entropy(a1_dis.contiguous().view([a1_dis.shape[0], -1]),
                                                            a_dis.contiguous().view([a_dis.shape[0], -1])),
                                    random_a_dis_loss).mean()
         elif ATTRS_KEY == 'class_attr':
             loss_a = NN.mse_loss(a1, a)
-            loss_a_cntx = NN.l1_loss(a1_cntx, a)
-            loss_a_dis = NN.l1_loss(a1_dis, a_dis)
+            loss_a_cntx = torch.min(NN.mse_loss(a1_cntx, a), torch.tensor(10.).to(device))
+            loss_a_dis = torch.min(NN.mse_loss(a1_dis, a_dis), torch.tensor(10.).to(device))
         else:
             raise ValueError()
 
-        l = 1. *loss_x
-        l += 1.*loss_a
-        #l += 1.*loss_a_cntx
-        #l += 1.*loss_a_dis
+        loss_x = NN.mse_loss(x1, x)
+        l =  10. *loss_x * 2048
+        l += 1. *loss_a * 85
+        l += .1 *loss_a_dis * 85
+        #l += .1 *loss_a_cntx * 85
 
         l.backward()
         opt.step()
@@ -261,5 +291,5 @@ for ep in range(nb_epochs):
     print(f"  - Loss a_cntx:  {torch.stack(L_a_cntx).mean():4.5f}")
     print("")
     if ep+1 >= 1:
-        run_test(net, (2048, 1024, 512,), train, test_unseen,
+        run_test(net, (2048, 1024, 512,), train, test_unseen, use_infinite_dataset=True,
                  nb_gen_class_samples=400, adapt_epochs=4, adapt_lr=.00004, adapt_bs=128, device=device)

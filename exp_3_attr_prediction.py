@@ -54,7 +54,7 @@ class Net(nn.Module):
         in_features = 2048
         pre_enc_units = (2048, 1024, 512)
         attr_enc_units = (256, 64,)
-        cntx_enc_units = (256, 128, )
+        cntx_enc_units = (256, 256, )
         attr_dec_hiddens = (64, 32)
         cntx_dec_hiddens = (128, 64, 32)
 
@@ -177,8 +177,8 @@ for ep in range(nb_epochs):
             raise ValueError()
 
         l = .5*loss_a
-        l += .25*loss_a_cntx
-        l += .25*loss_a_dis
+        #l += .25*loss_a_cntx
+        #l += .25*loss_a_dis
 
         l.backward()
         opt.step()
