@@ -1,3 +1,4 @@
+import os
 from copy import deepcopy
 
 from sortedcontainers import SortedSet
@@ -5,7 +6,7 @@ from torch import nn
 import torch
 from torch.utils.data import TensorDataset, DataLoader, Dataset
 
-from data import get_dataset, preprocess_dataset, download_data, normalize_dataset
+import data
 from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset
 
 from disentangle.layers import get_fc_net, GradientReversal, GradientReversalFunction, get_1by1_conv1d_net, IdentityLayer
@@ -33,8 +34,9 @@ class LossBox:
             s += f"  - Loss {key}:  {torch.stack(self._d[key]).mean():{self._str_format}}\n"
         return s
 
+
 class Autoencoder(nn.Module):
-    def __init__(self,feats_dim, z_dim, ka_dim, kc_dim, nb_attributes):
+    def __init__(self, feats_dim, z_dim, ka_dim, kc_dim, nb_attributes):
         super().__init__()
         self.feats_dim = feats_dim
         self.z_dim = z_dim
@@ -45,14 +47,13 @@ class Autoencoder(nn.Module):
         self.encX_Z = get_fc_net(feats_dim, None, z_dim, nn.ReLU(), nn.ReLU())
         self.decZ_X = get_fc_net(z_dim, None, feats_dim, nn.ReLU(), nn.ReLU())
         #
-        self.encZ_KA = get_fc_net(z_dim, None, ka_dim*nb_attributes, nn.ReLU(), nn.ReLU())
+        self.encZ_KA = get_fc_net(z_dim, None, ka_dim * nb_attributes, nn.ReLU(), nn.ReLU())
         self.encZ_KC = get_fc_net(z_dim, None, kc_dim, nn.ReLU(), nn.ReLU())
-        self.decK_Z = get_fc_net(ka_dim*nb_attributes+kc_dim, None, z_dim, nn.ReLU(), nn.ReLU())
+        self.decK_Z = get_fc_net(ka_dim * nb_attributes + kc_dim, None, z_dim, nn.ReLU(), nn.ReLU())
         #
         self.decKA_A = get_1by1_conv1d_net(ka_dim, None, 1, nn.ReLU(), nn.Sigmoid())
-        self.decKA_disA = nn.Sequential(GRL(1), get_1by1_conv1d_net(ka_dim, None, nb_attributes-1, nn.ReLU(), nn.Sigmoid()))
+        self.decKA_disA = nn.Sequential(GRL(1), get_1by1_conv1d_net(ka_dim, None, nb_attributes - 1, nn.ReLU(), nn.Sigmoid()))
         self.decKC_disC = nn.Sequential(GRL(1), get_fc_net(kc_dim, None, nb_attributes, nn.ReLU(), nn.Sigmoid()))
-
 
     def mask_ka(self, ka, a_mask):
         return ka * a_mask.repeat_interleave(self.ka_dim, dim=-1)
@@ -86,8 +87,8 @@ class Autoencoder(nn.Module):
 
     def forward(self, x, a_mask=None):
         ka, kc = self.encode(x)  # Image Encode
-        a1, ad = self.attr_decode(ka)   # Attribute decode and attribute disentangle decode
-        #a1, ad = self.attr_decode(ka, a_mask)   # Attribute decode and attribute disentangle decode
+        a1, ad = self.attr_decode(ka)  # Attribute decode and attribute disentangle decode
+        # a1, ad = self.attr_decode(ka, a_mask)   # Attribute decode and attribute disentangle decode
         x1 = self.decode(ka, kc, a_mask)  # Image decode
         ac = self.cntx_attr_decode(kc)  # Context disentangle from attribute decode
         return ka, kc, x1, a1, ad, ac
@@ -119,13 +120,12 @@ class Classifier(nn.Module):
         return self.net(x)
 
 
-
 def disentangle_loss(autoencoder: Autoencoder, classifier: Classifier, attr_enc, cntx_enc, label, all_mask_attrs):
     nb_classes = all_mask_attrs.shape[0]
     bs = len(attr_enc)
     attr_enc_exp = torch.repeat_interleave(attr_enc, repeats=nb_classes, dim=0)
     cntx_enc_exp = torch.repeat_interleave(cntx_enc, repeats=nb_classes, dim=0)
-    #label_exp = interlaced_repeat(label, nb_classes, dim=0)
+    # label_exp = interlaced_repeat(label, nb_classes, dim=0)
     all_attrs_exp = all_mask_attrs.repeat([bs, 1])
     #
     decoded = autoencoder.decode(attr_enc_exp, cntx_enc_exp, all_attrs_exp)
@@ -135,59 +135,75 @@ def disentangle_loss(autoencoder: Autoencoder, classifier: Classifier, attr_enc,
     return NN.cross_entropy(logits_diags, label)
 
 
+class Model:
+    def __init__(self, feats_dim, z_dim, ka_dim, kc_dim, nb_attributes, nb_train_classes, nb_test_classes=None, device=None):
+        self.autoencoder = Autoencoder(feats_dim, z_dim, ka_dim, kc_dim, nb_attributes).to(device)
+        self.cntx_classifier = nn.Sequential(GradientReversal(1), Classifier(kc_dim, nb_train_classes, )).to(device)
+        self.classifier = Classifier(feats_dim, nb_train_classes, (2048,)).to(device)
+        self.test_classifier = Classifier(feats_dim, nb_train_classes, (2048,)).to(device)
+        if nb_test_classes is not None:
+            self.test_classifier.reset_linear_classifier(nb_test_classes)
+        self.acc = -1
+        self.device = device
+
+    def load(self, state_dir='states', epoch=None):
+        from os.path import join
+        f = join(state_dir, 'model_best.pt') if epoch is None else join(state_dir, f'model_epoch_{epoch:03d}.pt')
+        print(f"Loading model {f}")
+        state = torch.load(f)
+        self.autoencoder.load_state_dict(state['autoencoder'])
+        self.classifier.load_state_dict(state['classifier'])
+        self.cntx_classifier.load_state_dict(state['cntx_classifier'])
+        self.test_classifier.load_state_dict(state['test_classifier'])
+        self.acc = state['adapt_acc']
+        return self
+
+    def save(self, state_dir='states', epoch=None, acc=None):
+        from os.path import join
+        if not os.path.isdir(state_dir):
+            os.mkdir(state_dir)
+        fpath = join(state_dir, 'model_best.pt') if epoch is None else join(state_dir, f'model_epoch_{epoch:03d}.pt')
+        self.acc = self.acc if acc is None else acc
+        torch.save({'autoencoder': self.autoencoder.state_dict(),
+                    'classifier': self.classifier.state_dict(),
+                    'cntx_classifier': self.cntx_classifier.state_dict(),
+                    'test_classifier': self.test_classifier.state_dict(),
+                    'adapt_acc': self.acc,
+                    }, fpath)
+
+    @classmethod
+    def show(cls, state_dir='states'):
+        states_files = sorted(os.listdir(state_dir))
+        best_state = torch.load(os.path.join(state_dir, 'best_models.pt'))
+        best_acc = best_state['adapt_acc']
+        for state_f in states_files:
+            state = torch.load(f'states/{state_f}')
+            acc = state['adapt_acc']
+            try:
+                ep = int(state_f.split('_')[-1].split('.')[0])
+                print(f"epoch {ep:03d}  -   acc={acc:2.4f}" + (' --- BEST ' if acc == best_acc else ''))
+            except:
+                continue
 
 
-def exp(seed=None, gpu=0, use_valid=False, use_masking=False, early_stop_patience=None,
+def exp(model: Model, train, test_unseen, test_seen=None, val=None,
+        bs=128,
+        use_masking=False, early_stop_patience=None,
         attrs_key='class_attr', mask_attrs_key='class_attr',
-        a_lr=.00001, c_lr=.0001, pretrain_classifier_epochs=5,
-        test_period=1, adapt_epochs=10, adapt_lr=.0001, adapt_gen_samples=300,
-        encode_during_test=False, test_use_masking=True, infinite_dataset=True,
-        verbose=2):
-    ################### CONFIGURATIONS
-    DOWNLOAD_DATA = False
-    PREPROCESS_DATA = False
-    DATASET = 'AWA2'  # 'CUB'
-    device = init(gpu_index=gpu, seed=seed)
-    if verbose >= 1:
-        print('\n\n\n')
-        print('*'*80)
-        print(f'   Starting new exp with seed {seed}')
-        print('*'*80)
-        print()
+        a_lr=.00001, c_lr=.0001, pretrain_cls_epochs=5,
+        nb_epochs=100,
+        test_period=1, test_epochs=10, test_lr=.0001, test_gen_samples=300,
+        test_encode=False, test_use_masking=True, infinite_dataset=True,
+        verbose=2, state_dir='states/exp_5'):
 
-    bs = 128
-    nb_epochs = 200
-
-     ################### START EXP
-    if DOWNLOAD_DATA:
-        download_data()
-    if PREPROCESS_DATA:
-        preprocess_dataset(DATASET)
-    train, val, test_unseen, test_seen = get_dataset(DATASET, use_valid=use_valid, gzsl=False, mean_sub=False, std_norm=False, l2_norm=False)
-    train, val, test_unseen, test_seen = normalize_dataset(train, val, test_unseen, test_seen, keys=('class_attr',), feats_range=(0, 1))
-    feats_dim = len(train['feats'][0])
-    nb_classes, nb_attributes = train[attrs_key].shape
-
-    classes = sorted(set(train['labels'].tolist()))
-    cls_counters = []
-    for cls in classes:
-        cls_counters.append(np.sum(train['labels'] == cls))
-    cls_counters = torch.tensor(cls_counters).float().to(device)
-    tot_examples = cls_counters.sum()
-
-
-    ka_dim=32
-    kc_dim=256  #best: 256, 512, 768
-    z_dim = 2048
-    autoencoder = Autoencoder(feats_dim, z_dim, ka_dim, kc_dim, nb_attributes).to(device)
-    classifier = Classifier(feats_dim, nb_classes, (2048, ) ).to(device)
-    cntx_classifier = nn.Sequential(GradientReversal(1), Classifier(kc_dim, nb_classes, )).to(device)
-
+    use_valid = True if val is not None else False
     train_dataset = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels']).long())
     train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=0, pin_memory=True, drop_last=False)
-    A = torch.tensor(train[attrs_key]).float().to(device)
-    A_mask = torch.tensor(train[mask_attrs_key]).float().to(device)
 
+    nb_train_classes, nb_attributes = train[attrs_key].shape
+    nb_test_classes, _ = test_unseen[attrs_key].shape
+    A = torch.tensor(train[attrs_key]).float().to(model.device)
+    A_mask = torch.tensor(train[mask_attrs_key]).float().to(model.device)
 
     def diag_nondiag_idx(rows_cols):
         diag_idx = SortedSet([(i, i) for i in range(rows_cols)])
@@ -196,24 +212,24 @@ def exp(seed=None, gpu=0, use_valid=False, use_masking=False, early_stop_patienc
         non_diag_idx = torch.Tensor(non_diag_idx).transpose(0, 1).long()
         return diag_idx, non_diag_idx
 
-
     diag_idx, non_diag_idx = diag_nondiag_idx(nb_attributes)
 
-
-    random_a_cntx_loss = torch.log(torch.tensor([nb_attributes]).float()).to(device)
-    random_a_dis_loss = torch.log(torch.tensor([nb_attributes*(nb_attributes-1)]).float()).to(device)
-
-    #run_test(netA, test_unseen, device=device)
+    # run_test(netA, test_unseen, device=device)
+    acc = gen_zsl_test(model.autoencoder, model.test_classifier, train, test_unseen, nb_gen_class_samples=test_gen_samples,
+                       encode_during_test=test_encode, use_masking=test_use_masking,
+                       infinite_dataset=infinite_dataset,
+                       adapt_epochs=test_epochs, adapt_lr=test_lr, device=model.device)
+    model.save(state_dir, epoch=0, acc=acc)
 
     # *********** CLASSIFIER PRE-TRAINING
-    c_opt = torch.optim.Adam(classifier.parameters(), lr=c_lr)
-    for i in range(pretrain_classifier_epochs):
+    c_opt = torch.optim.Adam(model.classifier.parameters(), lr=c_lr)
+    for i in range(pretrain_cls_epochs):
         L = LossBox('4.5f')
         for i, (x, y) in enumerate(train_loader):
-            x, y = x.to(device), y.to(device)
+            x, y = x.to(model.device), y.to(model.device)
 
             c_opt.zero_grad()
-            logits = classifier(x)
+            logits = model.classifier(x)
             l_cls = NN.cross_entropy(logits, y)
             l_cls.backward()
             c_opt.step()
@@ -222,54 +238,53 @@ def exp(seed=None, gpu=0, use_valid=False, use_masking=False, early_stop_patienc
             print(L)
 
     # *********** AUTOENCODER TRAINING
-    a_opt = torch.optim.Adam(list(autoencoder.parameters()) + list(classifier.parameters()) + list(cntx_classifier.parameters()),
-                             lr=a_lr)
+    a_opt = torch.optim.Adam(list(model.autoencoder.parameters()) + list(model.classifier.parameters())
+                             + list(model.cntx_classifier.parameters()), lr=a_lr)
 
     train_accs, valid_accs, test_accs = [], [], []
     best_patience_score = 0
     best_acc = 0
     patience = early_stop_patience
     for ep in range(nb_epochs):
-        if verbose >=2:
+        if verbose >= 2:
             print("\n")
-            print(f"Running Epoch {ep+1}/{nb_epochs}")
+            print(f"Running Epoch {ep + 1}/{nb_epochs}")
         L = LossBox('4.5f')
         for i, (x, y) in enumerate(train_loader):
-            x, y = x.to(device), y.to(device)
+            x, y = x.to(model.device), y.to(model.device)
             a = A[y]
             a_mask = A_mask[y]  # Masking with continuous attributes seems to work better!
 
             c_opt.zero_grad()
-            logits = classifier(x)
+            logits = model.classifier(x)
             l_cls = NN.cross_entropy(logits, y)
             l_cls.backward()
             c_opt.step()
 
-
             a_opt.zero_grad()
             a_dis = a[:, None, :].repeat(1, nb_attributes, 1)
             a_non_diag = a_dis[:, non_diag_idx[0], non_diag_idx[1]].reshape(a.shape[0], nb_attributes, nb_attributes - 1)
-            #a_diag = a_dis[:, diag_idx[0], diag_idx[1]].reshape(a.shape[0], nb_attributes)
+            # a_diag = a_dis[:, diag_idx[0], diag_idx[1]].reshape(a.shape[0], nb_attributes)
 
-            ka, kc, x1, a1, ad, ac = autoencoder.forward(x, a_mask if use_masking else None)
+            ka, kc, x1, a1, ad, ac = model.autoencoder.forward(x, a_mask if use_masking else None)
 
-            l_rec_x = NN.mse_loss(x1, x) # image reconstruction
-            l_rec_a1 = NN.l1_loss(a1, a) # attribute reconstruction
-            l_rec_ad = NN.l1_loss(ad, a_non_diag) # attribute disentanglement
-            l_rec_ac = NN.l1_loss(ac, a) # context disentanglement
+            l_rec_x = NN.mse_loss(x1, x)  # image reconstruction
+            l_rec_a1 = NN.l1_loss(a1, a)  # attribute reconstruction
+            l_rec_ad = NN.l1_loss(ad, a_non_diag)  # attribute disentanglement
+            l_rec_ac = NN.l1_loss(ac, a)  # context disentanglement
 
-            logits1 = classifier(x1)
+            logits1 = model.classifier(x1)
             l_cls1 = NN.cross_entropy(logits1, y)
 
-            logits = classifier(x)
+            logits = model.classifier(x)
             l_cls = NN.cross_entropy(logits, y)
 
-            logits_cntx = cntx_classifier(kc)
+            logits_cntx = model.cntx_classifier(kc)
             l_cls_cntx = NN.cross_entropy(logits_cntx, y)
 
-            #l_cls_contrastive = disentangle_loss(autoencoder, classifier, ka, kc, y, A_mask)
+            # l_cls_contrastive = disentangle_loss(autoencoder, classifier, ka, kc, y, A_mask)
 
-            l =  l_rec_x * 5
+            l = l_rec_x * 5
             l += l_rec_a1 * 5
             l += l_rec_ad * 1
             l += l_rec_ac * 1
@@ -277,50 +292,42 @@ def exp(seed=None, gpu=0, use_valid=False, use_masking=False, early_stop_patienc
             l += l_cls * .01
             l += l_cls1 * .01
             l += l_cls_cntx * .001
-            #l += l_cls_contrastive * .01
+            # l += l_cls_contrastive * .01
 
             l.backward()
             a_opt.step()
 
             if verbose >= 3:
                 L.append('x', l_rec_x);
-                L.append('a1', l_rec_a1); L.append('ad', l_rec_ad);  L.append('ac', l_rec_ac);
-                L.append('cls_x', l_cls); L.append('cls_x1', l_cls1);
+                L.append('a1', l_rec_a1);
+                L.append('ad', l_rec_ad);
+                L.append('ac', l_rec_ac);
+                L.append('cls_x', l_cls);
+                L.append('cls_x1', l_cls1);
                 L.append('l_cls_cntx', l_cls_cntx);
-                #L.append('l_cls_contrastive', l_cls_contrastive);
+                # L.append('l_cls_contrastive', l_cls_contrastive);
 
         if verbose >= 3:
             print(L)
 
-        #train_accs.append(run_test(netA, train, device=device, verbose=verbose>=2))
+        # train_accs.append(run_test(netA, train, device=device, verbose=verbose>=2))
         # if val is not None:
         #     valid_accs.append(gen_zsl_test(model, val, device=device, verbose=verbose >= 2))
         if test_period is not None and (ep + 1) % test_period == 0:
-            acc, adapt_state = gen_zsl_test(autoencoder, classifier, train, test_unseen, nb_gen_class_samples=adapt_gen_samples,
-                                                 encode_during_test=encode_during_test, use_masking=test_use_masking,
-                                                 infinite_dataset=infinite_dataset,
-                                                 adapt_epochs=adapt_epochs, adapt_lr=adapt_lr, device=device)
+            acc = gen_zsl_test(model.autoencoder, model.test_classifier, train, test_unseen, nb_gen_class_samples=test_gen_samples,
+                               encode_during_test=test_encode, use_masking=test_use_masking,
+                               infinite_dataset=infinite_dataset,
+                               adapt_epochs=test_epochs, adapt_lr=test_lr, device=model.device)
             test_accs.append(acc)
             if acc > best_acc:
                 best_acc = acc
                 print(f'New best accuracy: {best_acc:2.4f}')
-                torch.save({'autoencoder': autoencoder.state_dict(),
-                            'classifier': classifier.state_dict(),
-                            'cntx_classifier': cntx_classifier.state_dict(),
-                            'test_classifier': adapt_state,
-                            'adapt_acc': acc,
-                            }, 'states/best_models.pt')
+                model.save(state_dir, epoch=None, acc=acc)
+
             else:
                 print(f'Current accuracy: {acc:2.4f}')
                 print(f'Old best accuracy: {best_acc:2.4f}')
-
-            torch.save({'autoencoder': autoencoder.state_dict(),
-                        'classifier': classifier.state_dict(),
-                        'cntx_classifier': cntx_classifier.state_dict(),
-                        'test_classifier': adapt_state,
-                        'adapt_acc' : acc,
-                        }, f'states/models_epoch_{ep+1:03d}.pt')
-
+            model.save(state_dir, ep, acc)
 
         if patience is not None:
             pscore = valid_accs[-1] if val is not None else test_accs[-1]
@@ -333,12 +340,11 @@ def exp(seed=None, gpu=0, use_valid=False, use_masking=False, early_stop_patienc
                 if verbose >= 1:
                     print(f'--- Early Stopping ---     Best Score: {best_patience_score},  Best Test: {np.max(test_accs)}')
                 break
-    return train_accs, valid_accs, test_accs
-
+    return model, train_accs, valid_accs, test_accs
 
 
 def gen_zsl_test(autoencoder: Autoencoder,
-                 classifier: Classifier,
+                 test_classifier: Classifier,
                  train_dict,
                  zsl_unseen_test_dict,
                  nb_gen_class_samples=100,
@@ -346,7 +352,7 @@ def gen_zsl_test(autoencoder: Autoencoder,
                  adapt_lr: float = .0001,
                  adapt_bs: int = 128,
                  attrs_key='class_attr',
-                 attrs_mask_key='class_attr', #'class_attr_bin'
+                 attrs_mask_key='class_attr',  # 'class_attr_bin'
                  encode_during_test=False,
                  use_masking=False,
                  infinite_dataset=True,
@@ -357,8 +363,7 @@ def gen_zsl_test(autoencoder: Autoencoder,
     A_mask = torch.tensor(zsl_unseen_test_dict[attrs_mask_key]).float().to(device)
 
     ######## PREPARE NEW CLASSIFIER ###########
-    classifier = deepcopy(classifier)
-    classifier.reset_linear_classifier(nb_new_classes)
+    test_classifier.reset_linear_classifier(nb_new_classes)
 
     def test_on_test():
         unseen_test_feats = torch.tensor(zsl_unseen_test_dict['feats']).float()
@@ -366,19 +371,24 @@ def gen_zsl_test(autoencoder: Autoencoder,
         dloader = DataLoader(TensorDataset(unseen_test_feats, unseen_test_labels), batch_size=adapt_bs, num_workers=2)
         losses, preds, y_trues = [], [], []
         for X, Y in dloader:
-            X = X.to(device); Y = Y.to(device)
-            #z, ka, kc, z1, x1, a1, ad, ac = net(X)
+            X = X.to(device);
+            Y = Y.to(device)
+            # z, ka, kc, z1, x1, a1, ad, ac = net(X)
             if encode_during_test:
                 ka, kc = autoencoder.encode(X)
                 a1 = autoencoder.attr_decode(ka) if use_masking else None
                 x1 = autoencoder.decode(ka, kc, a1)
-                logit = classifier(x1)
+                logit = test_classifier(x1)
             else:
-                logit = classifier(X)
+                logit = test_classifier(X)
             loss = NN.cross_entropy(logit, Y)
-            losses.append(loss.detach().cpu()); preds.append(logit.argmax(dim=1)); y_trues.append(Y)
+            losses.append(loss.detach().cpu());
+            preds.append(logit.argmax(dim=1));
+            y_trues.append(Y)
 
-        preds = torch.cat(preds); y_trues = torch.cat(y_trues); unseen_loss = torch.stack(losses).mean()
+        preds = torch.cat(preds);
+        y_trues = torch.cat(y_trues);
+        unseen_loss = torch.stack(losses).mean()
         unseen_acc = np.mean([metrics.recall_score(NP(y_trues), NP(preds), labels=[k], average=None) for k in sorted(set(NP(y_trues)))])
         return unseen_loss, unseen_acc
 
@@ -388,19 +398,18 @@ def gen_zsl_test(autoencoder: Autoencoder,
         return autoencoder.encZ_KA(Z), autoencoder.encZ_KC(Z)
 
     if infinite_dataset:
-        dataset = InfiniteDataset(nb_gen_class_samples, enc_fn,
+        dataset = InfiniteDataset(nb_gen_class_samples * nb_new_classes, enc_fn,
                                   train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
                                   zsl_unseen_test_dict['class_attr_bin'], device=device)
     else:
         dataset = FrankensteinDataset(nb_gen_class_samples, enc_fn,
-                                  train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
-                                  zsl_unseen_test_dict['class_attr_bin'], device=device)
+                                      train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                      zsl_unseen_test_dict['class_attr_bin'], device=device)
 
     data_loader = DataLoader(dataset, batch_size=adapt_bs, num_workers=0, shuffle=True)
 
-
     ######## TRAINING NEW CLASSIFIER ###########
-    optim = torch.optim.Adam(classifier.net[-1].parameters(), lr=adapt_lr)
+    optim = torch.optim.Adam(test_classifier.net[-1].parameters(), lr=adapt_lr)
     best_unseen_acc = 0
     best_classifier_state = None
     for ep in range(adapt_epochs):
@@ -412,7 +421,7 @@ def gen_zsl_test(autoencoder: Autoencoder,
             optim.zero_grad()
             a_mask = A_mask[Y] if use_masking else None
             X = autoencoder.decode(ka, kc, a_mask)
-            logit =  classifier(X)
+            logit = test_classifier(X)
             loss = NN.cross_entropy(logit, Y)
             loss.backward()
             optim.step()
@@ -424,43 +433,58 @@ def gen_zsl_test(autoencoder: Autoencoder,
         acc = (y_trues == preds).float().mean()
         classifier_losses = torch.stack(losses).mean()
         unseen_loss, unseen_acc = test_on_test()
-        print(f"Classifier adaptation - Epoch {ep+1}/{adapt_epochs}:   Loss={classifier_losses:1.5f}    Acc={acc:1.4f}  -  uLoss={unseen_loss:1.5f}   uAcc={unseen_acc:1.5f}")
+        print(
+            f"Classifier adaptation - Epoch {ep + 1}/{adapt_epochs}:   Loss={classifier_losses:1.5f}    Acc={acc:1.4f}  -  uLoss="
+            f"{unseen_loss:1.5f}   uAcc={unseen_acc:1.5f}")
         if unseen_acc > best_unseen_acc:
             best_unseen_acc = unseen_acc
-            best_classifier_state = classifier.state_dict()
-    return best_unseen_acc, best_classifier_state
+            best_classifier_state = test_classifier.state_dict()
+        test_classifier.load_state_dict(best_classifier_state)
+    return best_unseen_acc  # , best_classifier_state
 
 
+# %%
 
-#%%
+def init_exp(gpu, seed, use_valid=False, download_data=False, preprocess_data=False, dataset='AWA2'):
+    device = init(gpu_index=gpu, seed=seed)
+    print('\n\n\n' + ('*' * 80) + f'\n   Starting new exp with seed {seed} on device {device}\n' + ('*' * 80) + '\n')
+    if download_data:
+        data.download_data()
+    if preprocess_data:
+        data.preprocess_dataset(dataset)
+    train, val, test_unseen, test_seen = data.get_dataset(dataset, use_valid=use_valid, gzsl=False, mean_sub=False, std_norm=False,
+                                                          l2_norm=False)
+    train, val, test_unseen, test_seen = data.normalize_dataset(train, val, test_unseen, test_seen, keys=('class_attr',),
+                                                                feats_range=(0, 1))
+    feats_dim = len(train['feats'][0])
+
+    ### INIT MODEL
+    ka_dim = 32
+    kc_dim = 256  # best: 256, 512, 768
+    z_dim = 2048
+    nb_train_classes, nb_attributes = train['class_attr'].shape
+    nb_test_classes, _ = test_unseen['class_attr'].shape
+    model = Model(feats_dim, z_dim, ka_dim, kc_dim, nb_attributes, nb_train_classes, nb_test_classes, device)
+    return model, train, test_unseen, test_seen, val
+
+
+def main():
+    model, train, val, test_unseen, test_seen = init_exp(0, 42, use_valid=False)
+
+    model, _, _, test_accs = exp(model, train, val, test_unseen, test_seen,
+                                 use_masking=True,
+                                 attrs_key='class_attr', mask_attrs_key='class_attr',
+                                 a_lr=.000002, c_lr=.0001,
+                                 pretrain_cls_epochs=0,
+                                 infinite_dataset=True,  # False
+
+                                 test_lr=.0004, test_gen_samples=200,  # 2000, 800
+                                 test_period=1, test_epochs=10,
+                                 test_encode=False, test_use_masking=True,
+
+                                 verbose=3,
+                                 state_dir='states/exp_5___1')
+
+
 if __name__ == '__main__':
-    # _, _, test_accs = exp(42, gpu=0, verbose=3, early_stop_patience=50, use_valid=False)
-    _, _, test_accs = exp(42, gpu=0, verbose=3,
-                          use_valid=False, use_masking=True,
-                          attrs_key='class_attr', mask_attrs_key='class_attr',
-                          a_lr=.000002, c_lr=.0001,
-                          pretrain_classifier_epochs=0,
-                          test_period=1, adapt_epochs=10,
-                          adapt_lr=.0004, adapt_gen_samples=2000, #800
-                          encode_during_test=False,
-                          infinite_dataset=True, # False
-                          test_use_masking=True)
-
-
-    #%%
-    #
-    # seeds = [42, 55, 0, 123]
-    # best_accs = {}
-    # nones = 0
-    # for seed in seeds:
-    #     _, _, test_accs = exp(seed, gpu=0, verbose=2, early_stop_patience=5, use_valid=False, la=1, lc=1, lx=0, grl=100)
-    #     ep = np.argmax(test_accs)
-    #     if seed is None:
-    #         seed = f'None-{nones}'
-    #         nones+=1
-    #     best_accs[seed] = (test_accs[ep], ep+1)
-    #
-    # print("Best test accuracies and epoch per each seed: ")
-    # print(best_accs)
-    #
-    # print(f"Mean best score: {np.mean([A[0] for A in best_accs.values()])}")
+    main()
