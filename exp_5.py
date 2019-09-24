@@ -1,10 +1,13 @@
 import os
+from abc import ABC, abstractmethod
 from copy import deepcopy
+from dataclasses import dataclass
 
 from sortedcontainers import SortedSet
 from torch import nn
 import torch
 from torch.utils.data import TensorDataset, DataLoader, Dataset
+from typing import Callable, Union
 
 import data
 from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset
@@ -34,9 +37,19 @@ class LossBox:
             s += f"  - Loss {key}:  {torch.stack(self._d[key]).mean():{self._str_format}}\n"
         return s
 
+@dataclass
+class AutoencoderHiddens:
+    encX_Z=None
+    encZ_X=None
+    encZ_KA=None
+    encZ_KC=None
+    decK_Z=None
+    decKA_A=None
+    decKA_disA=None
+    decKC_disC=None
 
 class Autoencoder(nn.Module):
-    def __init__(self, feats_dim, z_dim, ka_dim, kc_dim, nb_attributes):
+    def __init__(self, feats_dim, z_dim, ka_dim, kc_dim, nb_attributes, hiddens: AutoencoderHiddens=AutoencoderHiddens()):
         super().__init__()
         self.feats_dim = feats_dim
         self.z_dim = z_dim
@@ -44,16 +57,16 @@ class Autoencoder(nn.Module):
         self.kc_dim = kc_dim
         self.nb_attributes = nb_attributes
         GRL = GradientReversal
-        self.encX_Z = get_fc_net(feats_dim, None, z_dim, nn.ReLU(), nn.ReLU())
-        self.decZ_X = get_fc_net(z_dim, None, feats_dim, nn.ReLU(), nn.ReLU())
+        self.encX_Z = get_fc_net(feats_dim, hiddens.encX_Z, z_dim, nn.ReLU(), nn.ReLU())
+        self.decZ_X = get_fc_net(z_dim, hiddens.encZ_X, feats_dim, nn.ReLU(), nn.ReLU())
         #
-        self.encZ_KA = get_fc_net(z_dim, None, ka_dim * nb_attributes, nn.ReLU(), nn.ReLU())
-        self.encZ_KC = get_fc_net(z_dim, None, kc_dim, nn.ReLU(), nn.ReLU())
-        self.decK_Z = get_fc_net(ka_dim * nb_attributes + kc_dim, None, z_dim, nn.ReLU(), nn.ReLU())
+        self.encZ_KA = get_fc_net(z_dim, hiddens.encZ_KA, ka_dim * nb_attributes, nn.ReLU(), nn.ReLU())
+        self.encZ_KC = get_fc_net(z_dim, hiddens.encZ_KC, kc_dim, nn.ReLU(), nn.ReLU())
+        self.decK_Z = get_fc_net(ka_dim * nb_attributes + kc_dim, hiddens.decK_Z, z_dim, nn.ReLU(), nn.ReLU())
         #
-        self.decKA_A = get_1by1_conv1d_net(ka_dim, None, 1, nn.ReLU(), nn.Sigmoid())
-        self.decKA_disA = nn.Sequential(GRL(1), get_1by1_conv1d_net(ka_dim, None, nb_attributes - 1, nn.ReLU(), nn.Sigmoid()))
-        self.decKC_disC = nn.Sequential(GRL(1), get_fc_net(kc_dim, None, nb_attributes, nn.ReLU(), nn.Sigmoid()))
+        self.decKA_A = get_1by1_conv1d_net(ka_dim, hiddens.decKA_A, 1, nn.ReLU(), nn.Sigmoid())
+        self.decKA_disA = nn.Sequential(GRL(1), get_1by1_conv1d_net(ka_dim, hiddens.decKA_disA, nb_attributes - 1, nn.ReLU(), nn.Sigmoid()))
+        self.decKC_disC = nn.Sequential(GRL(1), get_fc_net(kc_dim, hiddens.decKC_disC, nb_attributes, nn.ReLU(), nn.Sigmoid()))
 
     def mask_ka(self, ka, a_mask):
         return ka * a_mask.repeat_interleave(self.ka_dim, dim=-1)
@@ -136,10 +149,14 @@ def disentangle_loss(autoencoder: Autoencoder, classifier: Classifier, attr_enc,
 
 
 class Model:
-    def __init__(self, feats_dim, z_dim, ka_dim, kc_dim, nb_attributes, nb_train_classes, nb_test_classes=None, device=None):
-        self.autoencoder = Autoencoder(feats_dim, z_dim, ka_dim, kc_dim, nb_attributes).to(device)
-        self.cntx_classifier = nn.Sequential(GradientReversal(1), Classifier(kc_dim, nb_train_classes, )).to(device)
-        self.classifier = Classifier(feats_dim, nb_train_classes, (2048,)).to(device)
+    def __init__(self,
+                 feats_dim, nb_attributes, nb_train_classes, nb_test_classes,
+                 z_dim, ka_dim, kc_dim,
+                 autoencoder_hiddens=AutoencoderHiddens(), cls_hiddens=(2048,), cntx_cls_hiddens=None,
+                 device=None):
+        self.autoencoder = Autoencoder(feats_dim, z_dim, ka_dim, kc_dim, nb_attributes, autoencoder_hiddens).to(device)
+        self.cntx_classifier = nn.Sequential(GradientReversal(1), Classifier(kc_dim, nb_train_classes, cntx_cls_hiddens)).to(device)
+        self.classifier = Classifier(feats_dim, nb_train_classes, cls_hiddens).to(device)
         self.test_classifier = Classifier(feats_dim, nb_train_classes, (2048,)).to(device)
         if nb_test_classes is not None:
             self.test_classifier.reset_linear_classifier(nb_test_classes)
@@ -286,8 +303,8 @@ def exp(model: Model, train, test_unseen, test_seen=None, val=None,
 
             l = l_rec_x * 5
             l += l_rec_a1 * 5
-            l += l_rec_ad * 1
-            l += l_rec_ac * 1
+            # l += l_rec_ad * 1
+            # l += l_rec_ac * 1
 
             l += l_cls * .01
             l += l_cls1 * .01
@@ -340,7 +357,7 @@ def exp(model: Model, train, test_unseen, test_seen=None, val=None,
                 if verbose >= 1:
                     print(f'--- Early Stopping ---     Best Score: {best_patience_score},  Best Test: {np.max(test_accs)}')
                 break
-    return model, train_accs, valid_accs, test_accs
+    return train_accs, valid_accs, test_accs
 
 
 def gen_zsl_test(autoencoder: Autoencoder,
@@ -445,7 +462,15 @@ def gen_zsl_test(autoencoder: Autoencoder,
 
 # %%
 
-def init_exp(gpu, seed, use_valid=False, download_data=False, preprocess_data=False, dataset='AWA2'):
+def build_model_A(feats_dim: int, nb_attributes: int, nb_train_classes: int, nb_test_classes:int, device: Union[str, None]=None) -> Model:
+    return Model(feats_dim, nb_attributes, nb_train_classes, nb_test_classes,
+                 z_dim=2048, ka_dim=32, kc_dim=256,  # best kc: 256, 512, 768
+                 autoencoder_hiddens=AutoencoderHiddens(), cls_hiddens=(2048,), cntx_cls_hiddens=None,
+                 device=device)
+
+build_model_fn = Callable[[int, int, int, int, Union[str, None]], Model]
+
+def init_exp(get_model_fn: build_model_fn, gpu, seed, use_valid=False, download_data=False, preprocess_data=False, dataset='AWA2'):
     device = init(gpu_index=gpu, seed=seed)
     print('\n\n\n' + ('*' * 80) + f'\n   Starting new exp with seed {seed} on device {device}\n' + ('*' * 80) + '\n')
     if download_data:
@@ -459,31 +484,28 @@ def init_exp(gpu, seed, use_valid=False, download_data=False, preprocess_data=Fa
     feats_dim = len(train['feats'][0])
 
     ### INIT MODEL
-    ka_dim = 32
-    kc_dim = 256  # best: 256, 512, 768
-    z_dim = 2048
     nb_train_classes, nb_attributes = train['class_attr'].shape
     nb_test_classes, _ = test_unseen['class_attr'].shape
-    model = Model(feats_dim, z_dim, ka_dim, kc_dim, nb_attributes, nb_train_classes, nb_test_classes, device)
+    model = get_model_fn(feats_dim, nb_attributes, nb_train_classes, nb_test_classes, device)
     return model, train, test_unseen, test_seen, val
 
 
 def main():
-    model, train, val, test_unseen, test_seen = init_exp(0, 42, use_valid=False)
+    model, train, test_unseen, test_seen, val = init_exp(build_model_A, 0, 42, use_valid=False)
 
-    model, _, _, test_accs = exp(model, train, val, test_unseen, test_seen,
-                                 use_masking=True,
-                                 attrs_key='class_attr', mask_attrs_key='class_attr',
-                                 a_lr=.000002, c_lr=.0001,
-                                 pretrain_cls_epochs=0,
-                                 infinite_dataset=True,  # False
+    _, _, test_accs = exp(model, train, test_unseen, test_seen, val,
+                          use_masking=True,
+                          attrs_key='class_attr', mask_attrs_key='class_attr',
+                          a_lr=.000002, c_lr=.0001,
+                          pretrain_cls_epochs=0,
+                          infinite_dataset=True,  # False
 
-                                 test_lr=.0004, test_gen_samples=200,  # 2000, 800
-                                 test_period=1, test_epochs=10,
-                                 test_encode=False, test_use_masking=True,
+                          test_lr=.0004, test_gen_samples=200,  # 2000, 800
+                          test_period=1, test_epochs=10,
+                          test_encode=False, test_use_masking=True,
 
-                                 verbose=3,
-                                 state_dir='states/exp_5___1')
+                          verbose=3,
+                          state_dir='states/exp_5___1')
 
 
 if __name__ == '__main__':

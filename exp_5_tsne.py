@@ -8,7 +8,7 @@ from torch import nn
 
 from disentangle.dataset_generator import FrankensteinDataset, InfiniteDataset
 from disentangle.layers import GradientReversal
-from exp_5 import Autoencoder, Classifier, gen_zsl_test, Model, init_exp
+from exp_5 import Autoencoder, Classifier, gen_zsl_test, Model, init_exp, build_model_A
 from utils import init
 from sklearn.decomposition import PCA
 import numpy as np
@@ -104,6 +104,7 @@ def tsne(model: Model, test_dicts, train_dict, nb_pca=None, nb_gen_class_samples
         sns.scatterplot(x=embeddings1[:,0], y=embeddings1[:, 1], hue=Y1,
                         palette=sns.color_palette("hls", nb_classes), legend=False, alpha=1, ax=axs[i])
     if savepath is not None:
+        os.makedirs(savepath, exist_ok=True)
         plt.savefig(os.path.join(savepath, title+'.png'))
     else:
         plt.show()
@@ -113,7 +114,7 @@ def tsne(model: Model, test_dicts, train_dict, nb_pca=None, nb_gen_class_samples
 
 
 def main():
-    model, train, test_unseen, test_seen, val = init_exp(0, 42, use_valid=False)
+    model, train, test_unseen, test_seen, val = init_exp(build_model_A, 0, 42, use_valid=False)
     savepath = None #'tsne/exp_5'
 
     for i in range(0, 4, 2):

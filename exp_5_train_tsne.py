@@ -1,33 +1,45 @@
 
-from exp_5 import exp, init_exp
+from exp_5 import exp, init_exp, build_model_A
 from exp_5_tsne import tsne
-
+import shutil
+import os
 
 def main():
-    exp_name = 'hello'
-    model, train, val, test_unseen, test_seen = init_exp(0, 42, use_valid=False)
+    exp_name = 'attr_rec_no_contr_attr_no_cntx_attr'
+    state_dir = f'states/{exp_name}'
+    tsne_dir = f'tsne/{exp_name}'
+
+    try:
+        os.makedirs(state_dir, exist_ok=False)
+    except FileExistsError as e:
+        print('\n\nSTATE FOLDER WITH THIS EXP_NAME ALREADY EXISTS!!')
+        raise e
+    shutil.copy('exp_5.py', os.path.join(state_dir, f'_exp_5__{exp_name}.py'))
+    shutil.copy('exp_5_train_tsne.py', os.path.join(state_dir, f'_exp_5_train_tsne__{exp_name}.py'))
+
+    model, train, test_unseen, test_seen, val = init_exp(build_model_A, gpu=1, seed=42, use_valid=False)
     epochs = 30
 
-    model, _, _, test_accs = exp(model, train, val, test_unseen, test_seen,
-                                 nb_epochs=epochs,
-                                 use_masking=True,
-                                 attrs_key='class_attr', mask_attrs_key='class_attr',
-                                 a_lr=.000002, c_lr=.0001,
-                                 pretrain_cls_epochs=0,
-                                 infinite_dataset=True,  # False
+    _, _, test_accs = exp(model, train, test_unseen, test_seen, val,
+                          nb_epochs=epochs,
+                          use_masking=True,
+                          attrs_key='class_attr', mask_attrs_key='class_attr',
+                          a_lr=.000002, c_lr=.0001,
+                          pretrain_cls_epochs=0,
+                          infinite_dataset=True,  # False
 
-                                 test_lr=.0004, test_gen_samples=2000,  # 800
-                                 test_period=1, test_epochs=10,
-                                 test_encode=False, test_use_masking=True,
+                          test_lr=.0004, test_gen_samples=500,  # 2000,  # 800
+                          test_period=1, test_epochs=10,
+                          test_encode=False, test_use_masking=True,
 
-                                 verbose=3,
-                                 state_dir=f'states/{exp_name}')
+                          verbose=3,
+                          state_dir=state_dir)
 
     for i in range(0, epochs+1, 1):
-        s = model.load(epoch=i)
-        app_title = f'- ep={i} - acc={s["adapt_acc"]*100:2.2f}'
-        tsne(model, [test_unseen, train], train, infinite_dataset=True, append_title=app_title, savepath=f'tsne/{exp_name}', target='feats')
-        tsne(model, [test_unseen, train], train, infinite_dataset=True, append_title=app_title, savepath=f'tsne/{exp_name}', target='attr_emb')
+        model.load(state_dir, epoch=i)
+        app_title = f'- ep={i} - acc={model.acc*100:2.2f}'
+        tsne(model, [test_unseen, train], train, infinite_dataset=True, append_title=app_title, savepath=tsne_dir, target='feats')
+        tsne(model, [test_unseen, train], train, infinite_dataset=True, append_title=app_title, savepath=tsne_dir, target='attr_emb')
 
 
 
