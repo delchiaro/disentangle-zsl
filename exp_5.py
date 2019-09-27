@@ -231,7 +231,7 @@ def exp(model: Model, train, test_unseen, test_seen=None, val=None,
 
     diag_idx, non_diag_idx = diag_nondiag_idx(nb_attributes)
 
-    # run_test(netA, test_unseen, device=device)
+   # run_test(netA, test_unseen, device=device)
     acc = gen_zsl_test(model.autoencoder, model.test_classifier, train, test_unseen, nb_gen_class_samples=test_gen_samples,
                        encode_during_test=test_encode, use_masking=test_use_masking,
                        infinite_dataset=infinite_dataset,
@@ -254,14 +254,28 @@ def exp(model: Model, train, test_unseen, test_seen=None, val=None,
         if verbose >= 3:
             print(L)
 
+    def set_grad(parameters_or_module, value: bool):
+        parameters = parameters_or_module.parameters() if isinstance(parameters_or_module, nn.Module) else parameters_or_module
+        for param in parameters:
+            param.requires_grad = value
+
+    #autoencoder_params = list(model.autoencoder.parameters())
+    flatten = lambda l: [item for sublist in l for item in sublist]
+    decoder_params = flatten([list(m.parameters()) for m in [model.autoencoder.decK_Z,  model.autoencoder.decZ_X,
+                                               model.autoencoder.decKA_A, model.autoencoder.decKC_disC, model.autoencoder.decKA_disA]])
+    encoder_params = flatten([list(m.parameters()) for m in
+                              [model.autoencoder.encX_Z, model.autoencoder.encZ_KA, model.autoencoder.encZ_KC]])
+
     # *********** AUTOENCODER TRAINING
-    a_opt = torch.optim.Adam(list(model.autoencoder.parameters()) + list(model.classifier.parameters())
+    a_opt = torch.optim.Adam(encoder_params + decoder_params
+                             + list(model.classifier.parameters())
                              + list(model.cntx_classifier.parameters()), lr=a_lr)
 
     train_accs, valid_accs, test_accs = [], [], []
     best_patience_score = 0
     best_acc = 0
     patience = early_stop_patience
+
     for ep in range(nb_epochs):
         if verbose >= 2:
             print("\n")
@@ -302,9 +316,9 @@ def exp(model: Model, train, test_unseen, test_seen=None, val=None,
             # l_cls_contrastive = disentangle_loss(autoencoder, classifier, ka, kc, y, A_mask)
 
             l = l_rec_x * 5
-            l += l_rec_a1 * 5
-            # l += l_rec_ad * 1
-            # l += l_rec_ac * 1
+            #l += l_rec_a1 * 5
+            #l += l_rec_ad * 1
+            #l += l_rec_ac * 1
 
             l += l_cls * .01
             l += l_cls1 * .01
@@ -467,6 +481,24 @@ def build_model_A(feats_dim: int, nb_attributes: int, nb_train_classes: int, nb_
                  z_dim=2048, ka_dim=32, kc_dim=256,  # best kc: 256, 512, 768
                  autoencoder_hiddens=AutoencoderHiddens(), cls_hiddens=(2048,), cntx_cls_hiddens=None,
                  device=device)
+
+
+def build_model_B(feats_dim: int, nb_attributes: int, nb_train_classes: int, nb_test_classes:int, device: Union[str, None]=None) -> Model:
+    autoenc_hid = AutoencoderHiddens()
+    autoenc_hid.decK_Z = (2048, )
+    return Model(feats_dim, nb_attributes, nb_train_classes, nb_test_classes,
+                 z_dim=2048, ka_dim=32, kc_dim=256,  # best kc: 256, 512, 768
+                 autoencoder_hiddens=autoenc_hid, cls_hiddens=(2048,), cntx_cls_hiddens=None,
+                 device=device)
+
+def build_model_C(feats_dim: int, nb_attributes: int, nb_train_classes: int, nb_test_classes:int, device: Union[str, None]=None) -> Model:
+    autoenc_hid = AutoencoderHiddens()
+    autoenc_hid.encX_Z = (2048, )
+    return Model(feats_dim, nb_attributes, nb_train_classes, nb_test_classes,
+                 z_dim=2048, ka_dim=32, kc_dim=256,  # best kc: 256, 512, 768
+                 autoencoder_hiddens=autoenc_hid, cls_hiddens=(2048,), cntx_cls_hiddens=None,
+                 device=device)
+
 
 build_model_fn = Callable[[int, int, int, int, Union[str, None]], Model]
 
