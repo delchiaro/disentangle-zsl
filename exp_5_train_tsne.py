@@ -7,7 +7,7 @@ import os
 def main():
     gpu=0
     seed=42
-    exp_name = 'modelB_freeze-enc_defreze-enc@40'
+    exp_name = 'modelA_frank_train_contrastive'
     build_model_fn = build_model_A
     state_dir = f'states/{exp_name}'
     tsne_dir = f'tsne/{exp_name}'
@@ -24,15 +24,17 @@ def main():
     shutil.copy('exp_5_train_tsne.py', os.path.join(state_dir, f'_exp_5_train_tsne__{exp_name}.py'))
     _, _, test_accs = exp(model, train, test_unseen, test_seen, val,
                           nb_epochs=epochs,
-                          use_masking=True,
-                          attrs_key='class_attr', mask_attrs_key='class_attr',
-                          a_lr=.000002, c_lr=.0001,
+                          masking=True,
+                          #attrs_key='class_attr', mask_attrs_key='class_attr',
+                          attrs_key='class_attr_bin', mask_attrs_key='class_attr_bin',
+                          #a_lr=.000002, c_lr=.0001,
+                          a_lr=.00002, c_lr=.0001,
                           pretrain_cls_epochs=0,
                           infinite_dataset=True,  # False
-
+                          train_frankenstain=True,
                           test_lr=.001, test_gen_samples=500,  # 2000,  # 800
-                          test_period=1, test_epochs=10,
-                          test_encode=False, test_use_masking=True,
+                          test_period=1, test_epochs=4,
+                          test_encode=False, test_masking=True,
 
                           verbose=3,
                           state_dir=state_dir)
