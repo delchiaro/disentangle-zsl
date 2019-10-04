@@ -7,7 +7,7 @@ from .net import DisentangleGen, DisentangleEncoder
 
 class InfiniteDataset(Dataset):
     def __init__(self, len, encoder_fn, train_feats, train_labels, train_attrs_bin, test_attrs_bin,
-                 new_class_offset=0, device=None, pre_compute=True, **args):
+                 new_class_offset=0, device=None, use_context=True, **args):
         """
         :param len: dataset length
         :param encoder_fn: function that take a batch of image features X and return two tensor containing attribute_embedding and context_embedding
@@ -27,6 +27,8 @@ class InfiniteDataset(Dataset):
         self._test_attrs = test_attrs_bin
         self._new_class_offset = new_class_offset
         self._nb_attributes = train_attrs_bin.shape[1]
+        self._use_context = use_context
+        self._device = device
         # Extract attirbute embeddings for training set.
         ds = TensorDataset(torch.tensor(train_feats).float(), torch.tensor(train_labels).long())
         dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=6, pin_memory=False, drop_last=False)
@@ -66,7 +68,8 @@ class InfiniteDataset(Dataset):
         attr = self._test_attrs[cls]
         attr_indices, = np.where(attr)
 
-        random_cntx_enc = self._cntx_encoding[np.random.randint(len(self._cntx_encoding))]
+        random_cntx_enc = self._cntx_encoding[np.random.randint(len(self._cntx_encoding))] if self._use_context \
+            else torch.tensor([]).float().to(self._device)
         frankenstein_attr_enc = np.zeros_like(self._attr_encoding[0])
         for idx in attr_indices:
             try:

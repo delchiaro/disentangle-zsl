@@ -22,7 +22,10 @@ from sklearn.decomposition import PCA
 from tsnecuda import TSNE
 
 
-
+def set_grad(parameters_or_module, value: bool):
+    parameters = parameters_or_module.parameters() if isinstance(parameters_or_module, nn.Module) else parameters_or_module
+    for param in parameters:
+        param.requires_grad = value
 
 class LossBox:
     def __init__(self, str_format='4.5f'):
@@ -66,8 +69,17 @@ class AutoencoderHiddens:
 GRL = GradientReversal
 
 class NoneLayer(nn.Module):
+    def __init__(self, device=None):
+        super().__init__()
+        self.device=device
+
+    def to(self, *args, **kwargs):
+        device, dtype, non_blocking = torch._C._nn._parse_to(*args, **kwargs)
+        self.device = device
+        return self
+
     def forward(self, x):
-        return torch.tensor([]).float()
+        return torch.tensor([]).float().to(self.device)
 
 
 class Autoencoder(nn.Module):
@@ -80,7 +92,7 @@ class Autoencoder(nn.Module):
         self.kc_dim = kc_dim = kc_dim if use_context else 0
         self.nb_attributes = nb_attributes
         self._use_1by1_conv = conv1by1
-        self._use_kc = use_context
+        self.use_context = use_context
 
         hid_act = nn.ReLU
         self.encX_Z = get_fc_net(feats_dim, hiddens.encX_Z, z_dim, hid_act(), hid_act())
@@ -97,6 +109,11 @@ class Autoencoder(nn.Module):
             self.decKA_A = get_block_fc_net(nb_attributes, ka_dim, hiddens.decKA_A, 1, hid_act(), nn.Sigmoid())
             self.decKA_disA = nn.Sequential(GRL(1), get_block_fc_net(nb_attributes, ka_dim, hiddens.decKA_disA, nb_attributes - 1, hid_act(), nn.Sigmoid()))
         self.decKC_disC = nn.Sequential(GRL(1), get_fc_net(kc_dim, hiddens.decKC_disC, nb_attributes, hid_act(), nn.Sigmoid()))  if use_context else NoneLayer()
+
+    def to(self, *args, **kwargs):
+        self.decKC_disC.to(*args, **kwargs)
+        self.encZ_KC.to(*args, **kwargs)
+        return super().to(*args, **kwargs)
 
     def mask_ka(self, ka, a_mask):
         return ka * a_mask.repeat_interleave(self.ka_dim, dim=-1)
@@ -256,12 +273,12 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
         masking=True, attr_disentangle=False, train_frankenstain=False,
         early_stop_patience=None,
 
-        test_period=1, test_epochs=10, test_lr=.0001, test_gen_samples=300, test_masking=True, test_encode=False,
+        test_period=1, test_epochs=10, test_lr=.0001, test_gen_samples=300,
         infinite_dataset=True,
         test_tsne=False,
         verbose=2,
-        state_dir='states/exp_5'):
-
+        state_dir='states/exp_5',
+        save_states=False):
     attrs_key = 'class_attr_bin' if bin_attrs else 'class_attr'
     mask_attrs_key = 'class_attr_bin' if bin_masks else 'class_attr'
 
@@ -275,11 +292,13 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
 
     diag_idx, non_diag_idx = diag_nondiag_idx(nb_attributes)
 
-    # acc = gen_zsl_test(model.autoencoder, model.test_classifier, train, test_unseen, nb_gen_class_samples=test_gen_samples,
-    #                    encode_during_test=test_encode, use_masking=test_use_masking,
-    #                    infinite_dataset=infinite_dataset,
-    #                    adapt_epochs=test_epochs, adapt_lr=test_lr, device=model.device)
-    # model.save(state_dir, epoch=0, acc=acc)
+    if save_states:
+        acc = gen_zsl_test(model.autoencoder, model.test_classifier, train, test_unseen, nb_gen_class_samples=test_gen_samples,
+                           infinite_dataset=infinite_dataset,
+                           attrs_key=attrs_key, attrs_mask_key=mask_attrs_key,
+                           use_masking=masking,
+                           adapt_epochs=test_epochs, adapt_lr=test_lr, device=model.device)
+        model.save(state_dir, epoch=0, acc=acc)
 
     # *********** CLASSIFIER PRE-TRAINING
     c_opt = torch.optim.Adam(model.classifier.parameters(), lr=c_lr)
@@ -297,10 +316,6 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
         if verbose >= 3:
             print(L)
 
-    def set_grad(parameters_or_module, value: bool):
-        parameters = parameters_or_module.parameters() if isinstance(parameters_or_module, nn.Module) else parameters_or_module
-        for param in parameters:
-            param.requires_grad = value
 
     # autoencoder_params = list(model.autoencoder.parameters())
     flatten = lambda l: [item for sublist in l for item in sublist]
@@ -321,11 +336,11 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
     d_opt = torch.optim.Adam(decoder_params + list(model.classifier.parameters()) + list(model.cntx_classifier.parameters()),
                              lr=a_lr*10)
     zero_loss = torch.tensor([0.]).mean().to(model.device)
-    def compute_loss(lossBox:LossBox, x, a, y, x1, a1, ac, ad=None, logits=None, logits1=None, logits_cntx=None):
+    def compute_loss(lossBox:LossBox, x, a, y, x1, a1, ac=None, ad=None, logits=None, logits1=None, logits_cntx=None):
         l_rec_x = NN.mse_loss(x1, x)
-        l_rec_a1 = NN.l1_loss(a1, a)
-        l_rec_ac = NN.l1_loss(ac, a)
-        l_rec_ad = NN.l1_loss(ad, a_non_diag)  if ad is not None else zero_loss
+        l_rec_a1 = NN.mse_loss(a1, a)
+        l_rec_ac = NN.mse_loss(ac, a) if ac is not None else zero_loss
+        l_rec_ad = NN.mse_loss(ad, a_non_diag)  if ad is not None else zero_loss
         l_cls1 = NN.cross_entropy(logits1, y)  if logits1 is not None else zero_loss
         l_cls_cntx = NN.cross_entropy(logits_cntx, y)  if logits_cntx is not None else zero_loss
         l_cls = NN.cross_entropy(logits, y)  if logits is not None else zero_loss
@@ -354,6 +369,8 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
     best_acc = 0
     patience = early_stop_patience
     l_rec_ad = torch.tensor([0.])
+    fac = ac = flogits_cntx = logits_cntx = None
+
     for ep in range(nb_epochs):
         if verbose >= 2:
             print("\n")
@@ -361,53 +378,55 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
 
         if train_frankenstain:
             frnk_dataset = InfiniteDataset(len(train_dataset), model.autoencoder.encode, train['feats'], train['labels'], train['attr_bin'],
-                                           train['class_attr_bin'], device=model.device)
+                                           train['class_attr_bin'], use_context=model.autoencoder.use_context, device=model.device)
 
         L = LossBox('4.5f')
         FL = LossBox('4.5f')
         for i, (x, y) in enumerate(train_loader):
             x, y = x.to(model.device), y.to(model.device)
             a = A[y]
-            a_mask = A_mask[y]  # Masking with continuous attributes seems to work better!
+            a_mask = A_mask[y]  if masking else None # Masking with continuous attributes seems to work better!
 
             a_dis = a[:, None, :].repeat(1, nb_attributes, 1)
             a_non_diag = a_dis[:, non_diag_idx[0], non_diag_idx[1]].reshape(a.shape[0], nb_attributes, nb_attributes - 1)
             # a_diag = a_dis[:, diag_idx[0], diag_idx[1]].reshape(a.shape[0], nb_attributes)
 
-            #opt.zero_grad()
-            a_opt.zero_grad()
+            opt.zero_grad()
+            #a_opt.zero_grad()
             #ka, kc, x1, a1, ac, ad = model.autoencoder.forward(x, a_mask if masking else None, attr_disentangle)
             ka, kc = model.autoencoder.encode(x)
-            x1 = model.autoencoder.decode(ka, kc, a_mask)
-            a1 = model.autoencoder.attr_decode(ka)
-            ad = model.autoencoder.dis_attr_decode(ka) if attr_disentangle else None
-            ac = model.autoencoder.cntx_attr_decode(kc)
-
-
+            #x1 = model.autoencoder.decode(ka, kc, a_mask)
+            x1 = model.autoencoder.decode(ka, kc, a) # using a instead of a_mask!
+            a1 = model.autoencoder.attr_decode(ka, a_mask)
+            ad = model.autoencoder.dis_attr_decode(ka, a_mask) if attr_disentangle else None
             logits = model.classifier(x)
             logits1 = model.classifier(x1)
-            logits_cntx = model.cntx_classifier(kc)
+            if len(kc.shape) > 1:
+                logits_cntx = model.cntx_classifier(kc)
+                ac = model.autoencoder.cntx_attr_decode(kc)
             l = compute_loss(L, x, a, y, x1, a1, ac, ad, logits, logits1, logits_cntx)
             l.backward()
-            #opt.step()
-            a_opt.step()
+            opt.step()
+            #a_opt.step()
 
             if train_frankenstain:
-                #opt.zero_grad()
-                a_opt.zero_grad()
-                d_opt.zero_grad()
+                opt.zero_grad()
+                #a_opt.zero_grad()
+                #d_opt.zero_grad()
                 fka, fkc, fy = [t.to(model.device).detach() for t in frnk_dataset.get_items_with_class(y)]
-                frnk_a_mask = A_mask[fy]
-                fx1 = model.autoencoder.decode(fka, fkc, frnk_a_mask)
-                fa1 = model.autoencoder.attr_decode(fka)
-                fad = model.autoencoder.dis_attr_decode(fka) if attr_disentangle else None
-                fac = model.autoencoder.cntx_attr_decode(fkc)
-                flogits_cntx = model.cntx_classifier(fkc)
+                #frnk_a_mask = A_mask[fy]  if masking else None
+                #fx1 = model.autoencoder.decode(fka, fkc, a_mask)
+                fx1 = model.autoencoder.decode(fka, fkc, a) # using a instead of a_mask!
+                fa1 = model.autoencoder.attr_decode(fka, a_mask)
+                fad = model.autoencoder.dis_attr_decode(fka, a_mask) if attr_disentangle else None
                 flogits1 = model.classifier(fx1)
+                if len(kc.shape) > 1:
+                    fac = model.autoencoder.cntx_attr_decode(fkc)
+                    flogits_cntx = model.cntx_classifier(fkc)
                 fl = compute_loss(FL, x, a, y, fx1, fa1, fac, fad, None, flogits1, flogits_cntx)
                 fl.backward()
-                #opt.step()
-                d_opt.step()
+                opt.step()
+                #d_opt.step()
             # L.append('l_cls_contrastive', l_cls_contrastive);
 
         if verbose >= 3:
@@ -422,18 +441,20 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
             acc = gen_zsl_test(model.autoencoder, model.test_classifier, train, test_unseen, nb_gen_class_samples=test_gen_samples,
                                infinite_dataset=infinite_dataset,
                                attrs_key=attrs_key, attrs_mask_key=mask_attrs_key,
-                               use_masking=test_masking,
+                               use_masking=masking,
                                adapt_epochs=test_epochs, adapt_lr=test_lr, device=model.device)
             test_accs.append(acc)
             if acc > best_acc:
                 best_acc = acc
                 print(f'New best accuracy: {best_acc:2.4f}')
-                model.save(state_dir, epoch=None, acc=acc)
+                if save_states:
+                    model.save(state_dir, epoch=None, acc=acc)
 
             else:
                 print(f'Current accuracy: {acc:2.4f}')
                 print(f'Old best accuracy: {best_acc:2.4f}')
-            model.save(state_dir, ep, acc)
+            if save_states:
+                model.save(state_dir, ep, acc)
 
         if patience is not None:
             #pscore = valid_accs[-1] if val is not None else test_accs[-1]
@@ -498,7 +519,9 @@ def gen_zsl_test(autoencoder: Autoencoder,
     if infinite_dataset:
         dataset = InfiniteDataset(nb_gen_class_samples * nb_new_classes, enc_fn,
                                   train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
-                                  zsl_unseen_test_dict['class_attr_bin'], device=device)
+                                  zsl_unseen_test_dict['class_attr_bin'],
+                                  use_context=autoencoder.use_context,
+                                  device=device)
     else:
         dataset = FrankensteinDataset(nb_gen_class_samples, enc_fn,
                                       train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
@@ -517,8 +540,8 @@ def gen_zsl_test(autoencoder: Autoencoder,
         for data in data_loader:
             ka, kc, Y = data[0].to(device), data[1].to(device), data[2].to(device)
             optim.zero_grad()
-            a_mask = A_mask[Y] if use_masking else None
-            X = autoencoder.decode(ka, kc, a_mask)
+            X = autoencoder.decode(ka, kc,  A[Y] if use_masking else None) # Using A instead of A_mask
+            #X = autoencoder.decode(ka, kc,  A_mask[Y] if use_masking else None)
             logit = test_classifier(X)
             loss = NN.cross_entropy(logit, Y)
             loss.backward()
@@ -568,7 +591,9 @@ def tsne(model: Model, test_dicts, train_dict, nb_pca=None, nb_gen_class_samples
         if infinite_dataset:
             frankenstain_dataset = InfiniteDataset(nb_gen_class_samples * nb_classes, model.autoencoder.encode,
                                                    train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
-                                                   data_dict['class_attr_bin'], device=model.device)
+                                                   data_dict['class_attr_bin'],
+                                                   use_context=model.autoencoder.use_context,
+                                                   device=model.device)
         else:
             frankenstain_dataset = FrankensteinDataset(nb_gen_class_samples, model.autoencoder.encode,
                                                        train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
@@ -690,42 +715,3 @@ def init_exp(get_model_fn: build_model_fn, gpu, seed, use_valid=False, download_
     model = get_model_fn(feats_dim, nb_attributes, nb_train_classes, nb_test_classes, device)
     return model, train, test_unseen, test_seen, val
 
-
-def main():
-    model, train, test_unseen, test_seen, val = init_exp(build_model_A, 0, 42, use_valid=False)
-
-    # _, _, test_accs = exp(model, train, test_unseen, test_seen, val,
-    #                       masking=True,
-    #                       train_frankenstain=True,
-    #                       test_tsne=False,
-    #                       attrs_key='class_attr', mask_attrs_key='class_attr',
-    #                       a_lr=.000002, c_lr=.0001,
-    #                       pretrain_cls_epochs=0,
-    #                       infinite_dataset=True,  # False
-    #
-    #                       test_lr=.0004, test_gen_samples=200,  # 2000, 800
-    #                       test_period=1, test_epochs=10,
-    #                       test_encode=False, test_masking=True,
-    #
-    #                       verbose=3,
-    #                       state_dir='states/exp_5___1')
-
-
-    _, _, test_accs = exp(model, train, test_unseen,
-                          bs=128, nb_epochs=100, a_lr=.000002,
-                          pretrain_cls_epochs=5, c_lr=.0001,
-                          bin_attrs=False, bin_masks=False,
-                          masking=True, attr_disentangle=False, train_frankenstain=True,
-
-                          early_stop_patience=None,
-
-                          test_period=1, test_epochs=10, test_lr=.0004, test_gen_samples=200,
-                          test_masking=True, test_encode=False,
-
-                          test_tsne=False,
-                          verbose=2,
-                          state_dir='states/exp_5___1')
-
-
-if __name__ == '__main__':
-    main()
