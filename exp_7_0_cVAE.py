@@ -4,7 +4,7 @@ from abc import ABC
 from torch import nn
 import torch
 from torch.utils.data import TensorDataset, DataLoader, Dataset
-from typing import Callable, Union, List
+from typing import Callable, Union, List, Tuple
 
 import data
 from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset
@@ -149,23 +149,19 @@ class CVAE(Model):
             y = self.idx2onehot(label[:, None]).to(self.device, dtype=z.dtype)
             z = torch.cat((z, y), dim=1)
             x_gen = self.decoder(z)
-        return x_gen, label
+        return x_gen, label[:, None]
 
-    def tsne_plot(self, real_data: TensorDataset=None, gen_data: TensorDataset=None, nb_gen=None,
-                  nb_pca_components=None, append_title='', legend=False, savepath=None, dpi=250):
-        if gen_data is None:
-            Xg, Yg = (NP(T) for T in self.generate(nb_gen))
-        else:
-            Xg, Yg =  (NP(T) for T in gen_data.tensors)
+    def tsne_plot(self, data: Tuple[torch.FloatTensor], markers=['o', 'X', '.'], alphas=[1, 0.5, 0.3],
+                  nb_pca_components=None, append_title='', legend=False, savepath=None, figsize=(14, 8),  dpi=250,
+                  **kwargs):
+        if isinstance(data[0], torch.Tensor):
+            data = [data]
+        Xs = [NP(d[0]) for d in data]
+        X = np.concatenate(Xs, axis=0)
 
-        if real_data is None:
-            X, Y = None
-            all_classes = np.unique(Yg)
-        else:
-            X, Y = (NP(T) for T in real_data.tensors) if real_data is not None else (None, None)
-            all_classes = np.unique(np.concatenate([Y, Yg], axis=0))
+        Ys = [NP(d[1]) for d in data]
+        Y =  np.concatenate(Ys, axis=0)
 
-        nb_classes = len(all_classes)
 
         ### PCA
         if nb_pca_components is not None:
@@ -173,27 +169,27 @@ class CVAE(Model):
             print("Fitting PCA and transforming...")
             pca.fit(X)
             X = pca.transform(X)
-            Xg = pca.transform(Xg)
 
         ### TSNE FIT
         print("Fitting TSNE and transforming...")
-        feats = np.concatenate([X, Xg], axis=0) if X is not None else Xg
-        embeddings_gen = TSNE(n_components=2).fit_transform(feats)
-        if X is not None:
-            embeddings_real = embeddings_gen[:len(X)]
-            embeddings_gen = embeddings_gen[len(X):]
+        tsne_data = TSNE(n_components=2, **kwargs).fit_transform(X)
+
+
+        b = len(Xs[0])
+        Ts = [tsne_data[:b]]
+        for x in (Xs[1:]):
+            new_b = b+len(x)
+            Ts.append(tsne_data[b:new_b])
+            b = new_b
 
         # PLOT TSNE
         from matplotlib import pyplot as plt
         import seaborn as sns
-        fig = plt.figure(figsize=(18, 8), dpi=dpi)
+        fig = plt.figure(figsize=figsize, dpi=dpi)
         title = f'tsne {append_title}'
         fig.suptitle(title, fontsize=16)
-        if X is not None:
-            sns.scatterplot(x=embeddings_real[:, 0], y=embeddings_real[:, 1], hue=Y,
-                            palette=sns.color_palette("hls", nb_classes), legend=legend, alpha=0.4)
-        sns.scatterplot(x=embeddings_gen[:, 0], y=embeddings_gen[:, 1], hue=Yg,
-                        palette=sns.color_palette("hls", nb_classes), legend=legend, alpha=1)
+        for T, Y, m, a in zip(Ts, Ys, markers[:len(Ts)], alphas[:len(Ts)]):
+            sns.scatterplot(x=T[:, 0], y=T[:, 1], hue=Y[:, 0], marker=m, alpha=a, palette=sns.color_palette("hls", len(set(Y[:,0]))), legend=legend)
 
         if savepath is not None:
             os.makedirs(savepath, exist_ok=True)
@@ -233,14 +229,16 @@ if __name__ == '__main__':
 
     cvae = CVAE(feats_dim, 1500, 768, nb_train_classes).to(device)
     optimizer = optim.Adam(cvae.parameters(), lr=.001)
-    trainset = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels']).long())
+    trainset = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels'])[:,None].long())
     train_loader = DataLoader(trainset, batch_size=128, shuffle=True, drop_last=True)
 
     for ep in range(nb_epochs):
         loss = cvae.fit_loader(train_loader, optimizer)
         print(f'====> Epoch: {ep} Average loss: {loss/len(train_loader.dataset):.4f}')
-        if (ep+1)%50 == 0:
-            cvae.tsne_plot(trainset, nb_gen=30, append_title=f" - Epoch={ep+1}")
+        if (ep+1)%20 == 0:
+            gen_data = cvae.generate(nb_gen=200)
+            cvae.tsne_plot([trainset.tensors, gen_data], append_title=f" - Epoch={ep+1}",
+                           perplexity = 50, num_neighbors = 6, early_exaggeration = 12)
 
 
 
