@@ -345,7 +345,7 @@ if __name__ == '__main__':
         print(f'====> Epoch: {ep}')
         print(lossbox)
 
-        if (ep+1)%5 == 0:
+        if (ep+1)%10 == 0:
             classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_test_classes)
             zs_test(cvae, classifier, test_unseen, nb_gen_class_samples=1000, adapt_epochs=10, adapt_lr=.0004, device=device)
 

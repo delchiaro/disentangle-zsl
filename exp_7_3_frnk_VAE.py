@@ -371,18 +371,18 @@ if __name__ == '__main__':
         print(f'====> Epoch: {ep+1}')
         print(lossbox)
 
-        if (ep+1)%3 == 0:
+        if (ep+1)%10 == 0:
             # Test on unseen-test-set:
-            classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_test_classes)
-            zs_test(vae, classifier, train, test_unseen,
-                    nb_gen_class_samples=200, adapt_epochs=10, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
-                    plot_tsne=True)
-
-            # # Test on seen-test-set:
-            # classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_train_classes)
-            # zs_test(vae, classifier, train, train,
+            # classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_test_classes)
+            # zs_test(vae, classifier, train, test_unseen,
             #         nb_gen_class_samples=200, adapt_epochs=10, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
             #         plot_tsne=True)
+
+            # Test on seen-test-set:
+            classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_train_classes)
+            zs_test(vae, classifier, train, train,
+                    nb_gen_class_samples=200, adapt_epochs=3, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
+                    plot_tsne=True)
 
             # vae.tsne_plot([trainset_w_cls.tensors, (rec_x, rec_y)], append_title=f" - Epoch={ep + 1}",
             #               perplexity = 50, num_neighbors = 6, early_exaggeration = 12)

@@ -92,15 +92,19 @@ class CVAE(Model):
         self.encoder = Encoder(input_dim, hidden_dim, latent_dim, n_classes)
         self.decoder = Decoder(latent_dim, hidden_dim, input_dim, n_classes)
 
+    def sample_z(self, mu, var, y):
+        std = torch.exp(var / 2)
+        eps = torch.randn_like(std)
+        x_sample = eps.mul(std).add_(mu)
+        z = torch.cat((x_sample, y), dim=1)
+        return z
+
     def forward(self, x, y):
         x = torch.cat((x, y), dim=1)
         z_mu, z_var = self.encoder(x)
 
         # sample from the distribution having latent parameters z_mu, z_var reparameterize
-        std = torch.exp(z_var / 2)
-        eps = torch.randn_like(std)
-        x_sample = eps.mul(std).add_(z_mu)
-        z = torch.cat((x_sample, y), dim=1)
+        z = self.sample_z(z_mu, z_var, y)
 
         # decode
         generated_x = self.decoder(z)
@@ -148,6 +152,10 @@ class CVAE(Model):
             z = torch.randn(len(label), self._latent_dim).to(self.device)
             y = self.idx2onehot(label[:, None]).to(self.device, dtype=z.dtype)
             z = torch.cat((z, y), dim=1)
+            # y = self.idx2onehot(label[:, None]).to(self.device, dtype=torch.float32)
+            # mu = torch.randn(len(label), self._latent_dim, device=device)
+            # var = torch.randn(len(label), self._latent_dim, device=device)
+            # z = self.sample_z(mu, var, y)
             x_gen = self.decoder(z)
         return x_gen, label[:, None]
 
