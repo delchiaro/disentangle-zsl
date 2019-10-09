@@ -34,13 +34,20 @@ class InfiniteDataset(Dataset):
         dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=6, pin_memory=False, drop_last=False)
         attr_encoding = []
         cntx_encoding = []
-        for X in dl:
-            X = X[0].to(device)
-            ae, ce = self._encoder(X)
-            attr_encoding.append(ae.detach().cpu())
-            cntx_encoding.append(ce.detach().cpu())
+        if use_context:
+            for X in dl:
+                X = X[0].to(device)
+                ae, ce = self._encoder(X)
+                attr_encoding.append(ae.detach().cpu())
+                cntx_encoding.append(ce.detach().cpu())
+            self._cntx_encoding = torch.cat(cntx_encoding)
+        else:
+            for X in dl:
+                X = X[0].to(device)
+                ae = self._encoder(X)
+                attr_encoding.append(ae.detach().cpu())
+
         attr_encoding = torch.cat(attr_encoding)
-        self._cntx_encoding = torch.cat(cntx_encoding)
         self._attr_encoding = attr_encoding.view([attr_encoding.shape[0], self._nb_attributes, -1])
 
         # Find valid examples for each attribute.
@@ -68,8 +75,6 @@ class InfiniteDataset(Dataset):
         attr = self._test_attrs[cls]
         attr_indices, = np.where(attr)
 
-        random_cntx_enc = self._cntx_encoding[np.random.randint(len(self._cntx_encoding))] if self._use_context \
-            else torch.tensor([]).float().to(self._device)
         frankenstein_attr_enc = np.zeros_like(self._attr_encoding[0])
         for idx in attr_indices:
             try:
@@ -83,7 +88,13 @@ class InfiniteDataset(Dataset):
 
         frankenstein_attr_enc = frankenstein_attr_enc.reshape(-1)
         cls = cls + self._new_class_offset
-        return torch.tensor(frankenstein_attr_enc), random_cntx_enc, torch.tensor(cls)
+
+        result = torch.tensor(frankenstein_attr_enc)
+        if self._use_context:
+            random_cntx_enc = self._cntx_encoding[np.random.randint(len(self._cntx_encoding))]
+            result = (result, random_cntx_enc)
+
+        return result, torch.tensor(cls)
 
 
 class AsyncInfiniteDataset(Dataset):
