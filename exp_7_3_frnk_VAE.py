@@ -113,31 +113,25 @@ class ADisVAE(Model):
     def conv2fc(self, x):
         return x.view(x.shape[0], -1)
 
-    def _encode(self, x):
-        z_mu, z_var = self.encoder(x)
-        # sample from the distribution having latent parameters z_mu, z_var reparameterize
-        std = torch.exp(z_var / 2)
-        eps = torch.randn_like(std)
-        z = eps.mul(std).add_(z_mu)
-        return z, z_mu, z_var
-
-    def encode(self, x):
-        return self._encode(x)[0]
-
     def mask(self, z, a):
         a_mask = torch.repeat_interleave(a, self._latent_dim, dim=-1)
         return z*a_mask
 
+    def sample_z(self, z_mu, z_var):
+        # sample from the distribution having latent parameters z_mu, z_var reparameterize
+        std = torch.exp(z_var / 2)
+        eps = torch.randn_like(std)
+        z = eps.mul(std).add_(z_mu)
+        return z
 
     def forward(self, x, a_mask=None):
-        z, z_mu, z_var = self._encode(x)
-
+        z_mu, z_var = self.encoder(x)
+        z = self.sample_z(z_mu, z_var)
         # decode
         if a_mask is not None:
             x1 = self.decoder(self.mask(z, a_mask))
         else:
             x1 = self.decoder(z)
-
         # attr decode
         z_conv = self.fc2conv(z)
         a1 = self.attr_decoder(z_conv)
@@ -300,7 +294,7 @@ def zs_test(vae: ADisVAE,
         return unseen_loss, unseen_acc
 
     ######## DATA GENERATION/PREPARATION ###########
-    adapt_ds = InfiniteDataset(nb_gen_class_samples * nb_test_classes, lambda x: vae.encode(x),
+    adapt_ds = InfiniteDataset(nb_gen_class_samples * nb_test_classes, lambda x: vae.encoder(x),
                                train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
                                test_dict['class_attr_bin'], device=device, use_context=False)
 
@@ -321,10 +315,12 @@ def zs_test(vae: ADisVAE,
         y_trues = []
         losses = []
         test_classifier.train()
-        for z, y in adapt_loader:
-            z = z.to(device); y = y.to(device)
-            optim.zero_grad()
+        for emb, y in adapt_loader:
+            mu, var = emb
+            mu = mu.to(device); var = var.to(device); y = y.to(device)
+            z = vae.sample_z(mu, var)
             x = vae.decoder(z)
+            optim.zero_grad()
             rec_x.append(x.detach().cpu())
             rec_y.append(y.detach().cpu())
             logit = test_classifier(x)
@@ -359,11 +355,11 @@ if __name__ == '__main__':
     nb_test_classes, _ = test_unseen['class_attr'].shape
 
     vae = ADisVAE(feats_dim, 1500, 16, nb_attributes).to(device)
-    optimizer = optim.Adam(vae.parameters(), lr=.001)
+    optimizer = optim.Adam(vae.parameters(), lr=.00001)
     trainset_w_cls = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels'])[:,None].long())
     trainset = TensorDataset(torch.tensor(train['feats']).float(),
-                             torch.tensor(train['attr_bin']).float(),
-                             torch.tensor(train['attr_bin']).float())
+                             torch.tensor(train['attr_bin']).float(), # mask
+                             torch.tensor(train['attr']).float() ) # attr-reconstruction
     train_loader = DataLoader(trainset, batch_size=128, shuffle=True, drop_last=True)
 
     for ep in range(nb_epochs):
@@ -371,18 +367,18 @@ if __name__ == '__main__':
         print(f'====> Epoch: {ep+1}')
         print(lossbox)
 
-        if (ep+1)%3 == 0:
+        if (ep+1)%4 == 0:
             # Test on unseen-test-set:
-            classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_test_classes)
-            zs_test(vae, classifier, train, test_unseen,
-                    nb_gen_class_samples=200, adapt_epochs=10, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
-                    plot_tsne=True)
+            # classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_test_classes)
+            # zs_test(vae, classifier, train, test_unseen,
+            #         nb_gen_class_samples=200, adapt_epochs=10, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
+            #         plot_tsne=False)
 
             # # Test on seen-test-set:
-            # classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_train_classes)
-            # zs_test(vae, classifier, train, train,
-            #         nb_gen_class_samples=200, adapt_epochs=10, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
-            #         plot_tsne=True)
+            classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_train_classes)
+            zs_test(vae, classifier, train, train,
+                    nb_gen_class_samples=200, adapt_epochs=10, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
+                    plot_tsne=True)
 
             # vae.tsne_plot([trainset_w_cls.tensors, (rec_x, rec_y)], append_title=f" - Epoch={ep + 1}",
             #               perplexity = 50, num_neighbors = 6, early_exaggeration = 12)

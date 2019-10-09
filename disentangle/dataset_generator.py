@@ -6,11 +6,12 @@ from .net import DisentangleGen, DisentangleEncoder
 
 
 class InfiniteDataset(Dataset):
-    def __init__(self, len, encoder_fn, train_feats, train_labels, train_attrs_bin, test_attrs_bin,
+    def __init__(self, length, encoder_fn, train_feats, train_labels, train_attrs_bin, test_attrs_bin,
                  new_class_offset=0, device=None, use_context=True, **args):
         """
-        :param len: dataset length
-        :param encoder_fn: function that take a batch of image features X and return two tensor containing attribute_embedding and context_embedding
+        :param length: dataset length
+        :param encoder_fn: function that take a batch of image features X and return two tensor containing attribute_embedding and
+        context_embedding
         :param train_feats:
         :param train_labels:
         :param train_attrs_bin:
@@ -20,35 +21,36 @@ class InfiniteDataset(Dataset):
         :param args:
         """
         super().__init__(**args)
-        self._len = len
+        self._len = length
         self._encoder = encoder_fn
         self._train_feats = train_feats
         self._train_attrs = train_attrs_bin
         self._test_attrs = test_attrs_bin
         self._new_class_offset = new_class_offset
         self._nb_attributes = train_attrs_bin.shape[1]
-        self._use_context = use_context
         self._device = device
         # Extract attirbute embeddings for training set.
         ds = TensorDataset(torch.tensor(train_feats).float(), torch.tensor(train_labels).long())
         dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=6, pin_memory=False, drop_last=False)
-        attr_encoding = []
-        cntx_encoding = []
-        if use_context:
-            for X in dl:
-                X = X[0].to(device)
-                ae, ce = self._encoder(X)
-                attr_encoding.append(ae.detach().cpu())
-                cntx_encoding.append(ce.detach().cpu())
-            self._cntx_encoding = torch.cat(cntx_encoding)
-        else:
-            for X in dl:
-                X = X[0].to(device)
-                ae = self._encoder(X)
-                attr_encoding.append(ae.detach().cpu())
 
-        attr_encoding = torch.cat(attr_encoding)
-        self._attr_encoding = attr_encoding.view([attr_encoding.shape[0], self._nb_attributes, -1])
+
+        enc = self._encoder(next(iter(dl))[0].to(device))
+        if isinstance(enc, tuple) or isinstance(enc, set) or isinstance(enc, list):
+            encodings = [[]]* len(enc)
+            def add_fn(tensors):
+                for t, E in zip(tensors, encodings):
+                    E.append(t.detach().cpu())
+        else:
+            encodings = [[]]
+            def add_fn(tensor):
+                encodings[0].append(tensor.detach().cpu())
+
+        for X in dl:
+            X = X[0].to(device)
+            tensors =  self._encoder(X)
+            add_fn(tensors)
+        encodings = [torch.cat(E, dim=0) for E in encodings]
+        self.encodings = [E.view(E.shape[0], self._nb_attributes, -1) for E in encodings]
 
         # Find valid examples for each attribute.
         valid = []
@@ -64,18 +66,20 @@ class InfiniteDataset(Dataset):
         return self.get_item_with_class(cls)
 
     def get_items_with_class(self, Y):
-        AE, CE, CLS = [], [] , []
+        ENC, CLS = [], []
         for cls in Y:
-            ae, ce, y = self.get_item_with_class(cls)
-            AE.append(ae[None, :]); CE.append(ce[None, :]), CLS.append(y)
-        return  torch.cat(AE), torch.cat(CE), torch.tensor(CLS)
+            enc, y = self.get_item_with_class(cls)
+            #AE.append(ae[None, :]); CE.append(ce[None, :]), CLS.append(y)
+            ENC.append(enc[None, :]); CLS.append(y)
+        return  torch.cat(ENC),  torch.tensor(CLS)
 
 
     def get_item_with_class(self, cls):
         attr = self._test_attrs[cls]
         attr_indices, = np.where(attr)
 
-        frankenstein_attr_enc = np.zeros_like(self._attr_encoding[0])
+        frnk_enc = [np.zeros_like(E[0]).reshape([self._nb_attributes, -1]) for E in self.encodings]
+
         for idx in attr_indices:
             try:
                 emb = self._valid[idx][np.random.randint(len(self._valid[idx]))]
@@ -84,17 +88,13 @@ class InfiniteDataset(Dataset):
                 # t.with_traceback()
                 # raise t
                 continue
-            frankenstein_attr_enc[idx, :] = self._attr_encoding[emb, idx, :]
+            for i in range(len(self.encodings)):
+                frnk_enc[i][idx, :] = self.encodings[i][emb, idx, :]
 
-        frankenstein_attr_enc = frankenstein_attr_enc.reshape(-1)
+        for i in range(len(self.encodings)):
+            frnk_enc[i] = torch.tensor(frnk_enc[i].reshape(-1))
         cls = cls + self._new_class_offset
-
-        result = torch.tensor(frankenstein_attr_enc)
-        if self._use_context:
-            random_cntx_enc = self._cntx_encoding[np.random.randint(len(self._cntx_encoding))]
-            result = (result, random_cntx_enc)
-
-        return result, torch.tensor(cls)
+        return frnk_enc, torch.tensor(cls)
 
 
 class AsyncInfiniteDataset(Dataset):
