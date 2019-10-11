@@ -297,3 +297,22 @@ class BlockLinear(nn.Module):
 #%%
 
 
+import numpy as np
+class L2Norm(nn.Module):
+    def __init__(self, alpha, dim=1, norm_while_test=True, epsilon=np.finfo(float).eps):
+        super().__init__()
+        self.alpha = alpha
+        self.dim = dim
+        self.normalize_during_test=norm_while_test
+        self.epsilon = epsilon
+
+    def forward(self, x):
+        if not self.training and not self.normalize_during_test:
+            return x
+        else:
+            x = (x / (torch.norm(x, p=2, dim=self.dim)[:, None]+self.epsilon))
+            return x * self.alpha
+
+    def extra_repr(self):
+        return f'alpha={self.alpha}' + (', norm-while-test=True' if self.normalize_during_test else '')
+

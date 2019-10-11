@@ -9,7 +9,8 @@ from typing import Callable, Union, List, Tuple
 import data
 from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset
 
-from disentangle.layers import get_fc_net, GradientReversal, GradientReversalFunction, get_1by1_conv1d_net, IdentityLayer, get_block_fc_net
+from disentangle.layers import get_fc_net, GradientReversal, GradientReversalFunction, get_1by1_conv1d_net, IdentityLayer, get_block_fc_net, \
+    L2Norm
 from utils import init
 
 from sklearn import metrics
@@ -97,6 +98,8 @@ class AttrDecoder(nn.Module):
         x = F.relu(self.latent_to_hidden(x))
         return F.sigmoid(self.hidden_to_out(x))
 
+import torch.distributions as tdist
+
 class ADisVAE(Model):
     def __init__(self, input_dim, hidden_dim, latent_dim, nb_attributes):
         super().__init__()
@@ -107,7 +110,7 @@ class ADisVAE(Model):
         self.encoder = Encoder(input_dim, hidden_dim, latent_dim, nb_attributes)
         self.decoder = Decoder(latent_dim, nb_attributes, hidden_dim, input_dim)
         self.attr_decoder = AttrDecoder(latent_dim, hidden_dim, input_dim)
-
+        self._normal_dist = tdist.Normal(0, 0)
     def fc2conv(self, x):
         return x.view(x.shape[0], -1, self._nb_attributes)
     def conv2fc(self, x):
@@ -119,8 +122,13 @@ class ADisVAE(Model):
 
     def sample_z(self, z_mu, z_var):
         # sample from the distribution having latent parameters z_mu, z_var reparameterize
-        std = torch.exp(z_var / 2)
-        eps = torch.randn_like(std)
+
+        std = torch.exp(z_var/2)#*0.1
+        eps = torch.randn_like(std)#*0.1
+
+        # std = torch.exp(z_var/2)
+        # eps = self._normal_dist.sample(std.shape).to(self.device)
+
         z = eps.mul(std).add_(z_mu)
         return z
 
@@ -141,7 +149,9 @@ class ADisVAE(Model):
 
     def compute_loss(self, x, reconstructed_x, a, reconstructed_a, mean, log_var):
         RCLX = F.l1_loss(reconstructed_x, x, size_average=False)   # reconstruction loss
+        #RCLX = 1-F.cosine_similarity(reconstructed_x, x).mean()   # reconstruction loss
         RCLA = F.l1_loss(reconstructed_a, a, size_average=False)   # reconstruction loss
+
         KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())  # kl divergence loss
         return RCLX, RCLA, KLD
 
@@ -165,7 +175,7 @@ class ADisVAE(Model):
             ZMU.append(z_mu.detach().cpu()); ZVAR.append(z_var.detach().cpu())
         return (torch.cat(T, dim=0) for T in (X, Y, ZMU, ZVAR))
 
-    def fit_loader(self, train_loader, optimizer):
+    def fit_loader(self, train_loader, optimizer, alpha=(1, 1, 4)):
         self.train()
         L = LossBox()
         for i, (x, a_mask, a) in enumerate(train_loader):
@@ -175,7 +185,7 @@ class ADisVAE(Model):
             optimizer.zero_grad()
             x1, a1, z_mu, z_var = self.forward(x, a_mask)
             RCLx, RCLa, KLD = self.compute_loss(x, x1, a, a1, z_mu, z_var,)
-            loss = (1*RCLx + 1*RCLa) + 2*KLD
+            loss = alpha[0]*RCLx + alpha[1]*RCLa + alpha[2]*KLD
             loss.backward()
             optimizer.step()
             L.append('RCL-X', RCLx/x.shape[0]); L.append('RCL-A', RCLa/x.shape[0]); L.append('KLD', KLD); L.append('loss', loss/x.shape[0])
@@ -234,7 +244,8 @@ class ADisVAE(Model):
         title = f'tsne {append_title}'
         fig.suptitle(title, fontsize=16)
         for T, Y, m, a in zip(Ts, Ys, markers[:len(Ts)], alphas[:len(Ts)]):
-            sns.scatterplot(x=T[:, 0], y=T[:, 1], hue=Y[:, 0], marker=m, alpha=a, palette=sns.color_palette("hls", len(set(Y[:,0]))), legend=legend)
+            sns.scatterplot(x=T[:, 0], y=T[:, 1], hue=Y[:, 0], marker=m, alpha=a, palette=sns.color_palette("hls", len(set(Y[:,0]))),
+                            legend=legend)
 
         if savepath is not None:
             os.makedirs(savepath, exist_ok=True)
@@ -271,6 +282,7 @@ def zs_test(vae: ADisVAE,
             adapt_bs: int = 128,
             attrs_key='class_attr_bin',
             plot_tsne=False,
+            plot_tsne_l2_norm=True,
             device=None):
     test_A = torch.tensor(test_dict[attrs_key]).float().to(device)
     test_feats = torch.tensor(test_dict['feats']).float()
@@ -308,9 +320,10 @@ def zs_test(vae: ADisVAE,
     best_unseen_acc = 0
     best_classifier_state = None
 
-    rec_x = []
-    rec_y = []
+
     for ep in range(adapt_epochs):
+        rec_x = []
+        rec_y = []
         preds = []
         y_trues = []
         losses = []
@@ -319,8 +332,7 @@ def zs_test(vae: ADisVAE,
             mu, var = emb
             mu = mu.to(device); var = var.to(device); y = y.to(device)
             z = vae.sample_z(mu, var)
-            z = vae.mask(z, test_A[y])
-            x = vae.decoder(z)
+            x = vae.decoder(vae.mask(z, test_A[y]))
             optim.zero_grad()
             rec_x.append(x.detach().cpu())
             rec_y.append(y.detach().cpu())
@@ -340,8 +352,15 @@ def zs_test(vae: ADisVAE,
             best_classifier_state = test_classifier.state_dict()
         test_classifier.load_state_dict(best_classifier_state)
     if plot_tsne:
-        vae.tsne_plot([(test_feats, test_labels[:,None]), (torch.cat(rec_x), torch.cat(rec_y)[:,None])], append_title=f"",
-                    perplexity=50, num_neighbors=6, early_exaggeration=12)
+        # vae.tsne_plot([(test_feats, test_labels[:,None]), (torch.cat(rec_x), torch.cat(rec_y)[:,None])], append_title=f"",
+        #             perplexity=50, num_neighbors=6, early_exaggeration=12)
+        rec_x = torch.cat(rec_x)
+        rec_y = torch.cat(rec_y)[:, None]
+        if plot_tsne_l2_norm:
+            rec_x /= (torch.norm(rec_x, p=2, dim=1)[:, None]+np.finfo(float).eps)
+            test_feats /= (torch.norm(test_feats, p=2, dim=1)[:, None]+np.finfo(float).eps)
+
+        vae.tsne_plot([(test_feats, test_labels[:, None]), (rec_x, rec_y)], append_title=f"")
 
     return best_unseen_acc  # , best_classifier_state
 # %%
@@ -350,7 +369,7 @@ from torch import optim
 
 if __name__ == '__main__':
     nb_epochs=300
-    device, train, test_unseen, test_seen, val = init_exp(gpu=0, seed=42, dataset='AWA2')
+    device, train, test_unseen, test_seen, val = init_exp(gpu=1, seed=42, dataset='AWA2')
     feats_dim = len(train['feats'][0])
     nb_train_classes, nb_attributes = train['class_attr'].shape
     nb_test_classes, _ = test_unseen['class_attr'].shape
@@ -363,25 +382,32 @@ if __name__ == '__main__':
 
 
     train_loader = DataLoader(trainset, batch_size=128, shuffle=True, drop_last=True)
-    optimizer = optim.Adam(vae.parameters(), lr=.0001)
+    #optimizer = optim.Adam(vae.parameters(), lr=.0008)
+    optimizer = optim.Adam(vae.parameters(), lr=.001)
 
     for ep in range(nb_epochs):
-        lossbox = vae.fit_loader(train_loader, optimizer)
+        lossbox = vae.fit_loader(train_loader, optimizer, alpha=(1,100,8))
+        #lossbox = vae.fit_loader(train_loader, optimizer, alpha=(.001,50,2))
         print(f'====> Epoch: {ep+1}')
         print(lossbox)
 
-        if (ep+1)%3 == 0:
+        if (ep+1)%10 == 0:
             # Test on unseen-test-set:
-            classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_test_classes)
-            zs_test(vae, classifier, train, test_unseen,
-                    nb_gen_class_samples=200, adapt_epochs=5, adapt_lr=.002, adapt_bs=128, attrs_key='class_attr_bin', device=device,
+            classifier = nn.Sequential(#nn.Linear(feats_dim, feats_dim),
+                                       #L2Norm(10., norm_while_test=True),
+                                       nn.Linear(feats_dim, nb_test_classes))
+            #
+            # zs_test(vae, classifier, train, test_unseen,
+            #         nb_gen_class_samples=200, adapt_epochs=15, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
+            #         plot_tsne=True, plot_tsne_l2_norm=False)
+
+            # # Test on seen-train-set:
+            classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_train_classes)
+            zs_test(vae, classifier, train, train,
+                    nb_gen_class_samples=200, adapt_epochs=5, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
                     plot_tsne=True)
 
-            # # Test on seen-test-set:
-            # classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_train_classes)
-            # zs_test(vae, classifier, train, train,
-            #         nb_gen_class_samples=200, adapt_epochs=3, adapt_lr=.001, adapt_bs=128, attrs_key='class_attr_bin', device=device,
-            #         plot_tsne=True)
+
 
             # vae.tsne_plot([trainset_w_cls.tensors, (rec_x, rec_y)], append_title=f" - Epoch={ep + 1}",
             #               perplexity = 50, num_neighbors = 6, early_exaggeration = 12)
