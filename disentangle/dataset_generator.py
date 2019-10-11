@@ -97,6 +97,9 @@ class InfiniteDataset(Dataset):
         return frnk_enc, torch.tensor(cls)
 
 
+
+
+
 class AsyncInfiniteDataset(Dataset):
     def __init__(self, len, encoder_fn, train_feats, train_labels, train_attrs_bin, test_attrs_bin,
                  ka_dim, kc_dim,
