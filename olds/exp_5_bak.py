@@ -522,11 +522,11 @@ def gen_zsl_test(autoencoder: Autoencoder,
 
     if infinite_dataset:
         dataset = InfiniteDataset(nb_gen_class_samples * nb_new_classes, enc_fn,
-                                  train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                  train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                   zsl_unseen_test_dict['class_attr_bin'], device=device)
     else:
         dataset = FrankensteinDataset(nb_gen_class_samples, enc_fn,
-                                      train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                      train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                       zsl_unseen_test_dict['class_attr_bin'], device=device)
 
     data_loader = DataLoader(dataset, batch_size=adapt_bs, num_workers=0, shuffle=True)

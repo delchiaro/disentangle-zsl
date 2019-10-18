@@ -55,10 +55,11 @@ class InfiniteDataset(Dataset):
         self.encodings = [E.view(E.shape[0], self._nb_attributes, -1) for E in encodings]
 
         # Find valid examples for each attribute.
-        valid = []
+        idx_active_attr = []
+        train_examples_attrs_bin = train_attrs_bin[train_labels]
         for att in range(self._nb_attributes):
-            valid.append(np.where(train_attrs_bin[:, att] == 1)[0])
-        self._valid = valid
+            idx_active_attr.append(np.where(train_examples_attrs_bin[:, att] == 1)[0])
+        self._idx_active_attr = idx_active_attr
 
     def __len__(self):
         return self._len
@@ -84,7 +85,7 @@ class InfiniteDataset(Dataset):
 
         for idx in attr_indices:
             try:
-                emb = self._valid[idx][np.random.randint(len(self._valid[idx]))]
+                emb = self._idx_active_attr[idx][np.random.randint(len(self._idx_active_attr[idx]))]
             except ValueError as t:
                 # In this case there are no  examples with this attribute
                 # t.with_traceback()
@@ -257,8 +258,10 @@ class AsyncInfiniteDataset(Dataset):
         self._ka_dim = ka_dim
         self._kc_dim = kc_dim
         valid = []
+
+        train_examples_attrs_bin = train_attrs_bin[train_labels]
         for att in range(self._nb_attributes):
-            valid.append(np.where(train_attrs_bin[:, att] == 1)[0])
+            valid.append(np.where(train_examples_attrs_bin[:, att] == 1)[0])
         self._valid = valid
 
         # Extract attirbute embeddings for training set.

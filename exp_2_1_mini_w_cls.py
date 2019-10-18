@@ -69,11 +69,11 @@ def run_test(net,
     ######## DATA GENERATION/PREPARATION ###########
     if use_infinite_dataset:
         dataset = InfiniteDataset(nb_gen_class_samples * nb_new_classes, net.enc,
-                                  train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                  train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                   zsl_unseen_test_dict['class_attr_bin'], device=device)
     else:
         dataset = FrankensteinDataset(nb_gen_class_samples, net.enc,
-                                      train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                      train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                       zsl_unseen_test_dict['class_attr_bin'], device=device)
     data_loader = DataLoader(dataset, batch_size=adapt_bs, num_workers=2, shuffle=True)
 

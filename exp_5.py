@@ -377,7 +377,7 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
             print(f"Running Epoch {ep + 1}/{nb_epochs}")
 
         if train_frankenstain:
-            frnk_dataset = InfiniteDataset(len(train_dataset), model.autoencoder.encode, train['feats'], train['labels'], train['attr_bin'],
+            frnk_dataset = InfiniteDataset(len(train_dataset), model.autoencoder.encode, train['feats'], train['labels'], train['class_attr_bin'],
                                            train['class_attr_bin'], use_context=model.autoencoder.use_context, device=model.device)
 
         L = LossBox('4.5f')
@@ -518,13 +518,14 @@ def gen_zsl_test(autoencoder: Autoencoder,
 
     if infinite_dataset:
         dataset = InfiniteDataset(nb_gen_class_samples * nb_new_classes, enc_fn,
-                                  train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                  train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                   zsl_unseen_test_dict['class_attr_bin'],
                                   use_context=autoencoder.use_context,
                                   device=device)
+
     else:
         dataset = FrankensteinDataset(nb_gen_class_samples, enc_fn,
-                                      train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                      train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                       zsl_unseen_test_dict['class_attr_bin'], device=device)
 
     data_loader = DataLoader(dataset, batch_size=adapt_bs, num_workers=0, shuffle=True)
@@ -590,13 +591,13 @@ def tsne(model: Model, test_dicts, train_dict, nb_pca=None, nb_gen_class_samples
 
         if infinite_dataset:
             frankenstain_dataset = InfiniteDataset(nb_gen_class_samples * nb_classes, model.autoencoder.encode,
-                                                   train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                                   train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                                    data_dict['class_attr_bin'],
                                                    use_context=model.autoencoder.use_context,
                                                    device=model.device)
         else:
             frankenstain_dataset = FrankensteinDataset(nb_gen_class_samples, model.autoencoder.encode,
-                                                       train_dict['feats'], train_dict['labels'], train_dict['attr_bin'],
+                                                       train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                                        data_dict['class_attr_bin'], device=model.device)
         frankenstain_loader = DataLoader(frankenstain_dataset, batch_size=128, num_workers=0, shuffle=True)
 
