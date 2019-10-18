@@ -1,7 +1,9 @@
 import torch
 import numpy as np
+from scipy.special import softmax
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from data import get_dataset
+from scipy.spatial.distance import cdist
 from .net import DisentangleGen, DisentangleEncoder
 
 
@@ -97,6 +99,134 @@ class InfiniteDataset(Dataset):
         return frnk_enc, torch.tensor(cls)
 
 
+
+
+class ProbabilisticInfiniteDataset(Dataset):
+    def __init__(self, length, encoder_fn, train_feats, train_labels, train_attrs_bin, test_attrs_bin,
+                 new_class_offset=0, device=None, use_context=True, **args):
+        """
+        :param length: dataset length
+        :param encoder_fn: function that take a batch of image features X and return two tensor containing attribute_embedding and
+        context_embedding
+        :param train_feats:
+        :param train_labels:
+        :param train_attrs_bin:
+        :param test_attrs_bin:
+        :param new_class_offset:
+        :param device:
+        :param args:
+        """
+        super().__init__(**args)
+        self._len = length
+        self._encoder = encoder_fn
+        self._train_feats = train_feats
+        self._train_attrs = train_attrs_bin
+        self._test_attrs = test_attrs_bin
+        self._new_class_offset = new_class_offset
+        self._nb_attributes = train_attrs_bin.shape[1]
+        self._device = device
+        # Extract attirbute embeddings for training set.
+        ds = TensorDataset(torch.tensor(train_feats).float(), torch.tensor(train_labels).long())
+        dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=6, pin_memory=False, drop_last=False)
+
+
+        enc = self._encoder(next(iter(dl))[0].to(device))
+        if isinstance(enc, tuple) or isinstance(enc, set) or isinstance(enc, list):
+            encodings = [[]]* len(enc)
+            def add_fn(tensors):
+                for t, E in zip(tensors, encodings):
+                    E.append(t.detach().cpu())
+        else:
+            encodings = [[]]
+            def add_fn(tensor):
+                encodings[0].append(tensor.detach().cpu())
+
+        for X in dl:
+            X = X[0].to(device)
+            tensors =  self._encoder(X)
+            add_fn(tensors)
+        encodings = [torch.cat(E, dim=0) for E in encodings]
+        self.encodings = [E.view(E.shape[0], self._nb_attributes, -1) for E in encodings]
+
+        # Find valid examples for each attribute.
+        train_examples_attrs_bin = train_attrs_bin[train_labels]
+        idx_active_attr = []
+        for att in range(self._nb_attributes):
+            idx_active_attr.append(np.where(train_examples_attrs_bin[:, att] == 1)[0])
+
+        idx_with_label = []
+        for label in sorted(set(train_labels)):
+            idx_with_label.append(np.where(train_labels == label)[0])
+
+
+        D = cdist([av for av in test_attrs_bin], [av for av in train_attrs_bin], 'cityblock')
+        self.class_attribute_similarity = self._nb_attributes - D
+        if np.all(train_attrs_bin == train_attrs_bin):
+            np.fill_diagonal(self.class_attribute_similarity, 0)
+        #self.probs = softmax(S, axis=1)
+
+
+        # Precompute all the similarities (and so - probabilities) of each test-class to all the train classes based on
+        # attribute vector distances.
+        # We do this for each test-class, and we repeat this for each attribute because we want to mask/prune the similarities
+        # with train-classes not having that attribute active.
+        P = []
+        for test_cls in range(len(test_attrs_bin)):
+            attr_to_train_cls_probs = []
+            for attr_id in range(self._nb_attributes):
+                # Create a mask with lenght equal to the number of training classes,
+                # having 1 for classes having the current attribute 'attr_id" active.
+                classes_mask = np.asarray(self._train_attrs[:, attr_id] == 1, 'int')
+                # Mask the similarities between train and test classes, so that similarity for
+                # classes having current attribute 'attr_id' NOT ACTIVE will be zeroed.
+                masked_similarities = self.class_attribute_similarity[test_cls] * classes_mask
+                # We normalize the masked similarity to compute the probability
+                prob = softmax(masked_similarities)
+                attr_to_train_cls_probs.append(prob)
+            P.append(np.array(attr_to_train_cls_probs))
+        self._probs = P
+        self._idx_active_attr = idx_active_attr
+        self._idx_with_label = idx_with_label
+
+    def __len__(self):
+        return self._len
+
+    def __getitem__(self, i):
+        cls = np.random.randint(len(self._test_attrs))
+        return self.get_item_with_class(cls)
+
+    def get_items_with_class(self, Y):
+        ENC, CLS = [], []
+        for cls in Y:
+            enc, y = self.get_item_with_class(cls)
+            #AE.append(ae[None, :]); CE.append(ce[None, :]), CLS.append(y)
+            ENC.append(enc[None, :]); CLS.append(y)
+        return  torch.cat(ENC),  torch.tensor(CLS)
+
+
+    def get_item_with_class(self, cls):
+        attr = self._test_attrs[cls]
+        attr_indices, = np.where(attr)
+        frnk_enc = [np.zeros_like(E[0]).reshape([self._nb_attributes, -1]) for E in self.encodings]
+        for attr_id in attr_indices:
+            try:
+                # classes_mask = np.asarray(self._train_attrs[:, attr_id] == 1, 'int')
+                # masked_similarities = self.class_attribute_similarity[cls] * classes_mask
+                # prob1 = softmax(masked_similarities)
+                prob = self._probs[cls][attr_id]
+                rnd_similar_cls = np.random.choice(np.arange(len(prob)), p=prob)
+                example_id = self._idx_with_label[rnd_similar_cls][np.random.randint(len(self._idx_with_label[rnd_similar_cls]))]
+
+            except ValueError as t:
+                # In this case there are no  examples with this attribute
+                continue
+            for i in range(len(self.encodings)):
+                frnk_enc[i][attr_id, :] = self.encodings[i][example_id, attr_id, :]
+
+        for i in range(len(self.encodings)):
+            frnk_enc[i] = torch.tensor(frnk_enc[i].reshape(-1))
+        cls = cls + self._new_class_offset
+        return frnk_enc, torch.tensor(cls)
 
 
 
