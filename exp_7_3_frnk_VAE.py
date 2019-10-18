@@ -403,7 +403,7 @@ if __name__ == '__main__':
         print(f'====> Epoch: {ep+1}')
         print(lossbox)
 
-        if (ep+1)%3 == 0:
+        if (ep+1)%10 == 0:
             # Test on unseen-test-set:
             classifier = nn.Sequential(#nn.Linear(feats_dim, feats_dim),
                                        #L2Norm(10., norm_while_test=True),
