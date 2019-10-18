@@ -8,7 +8,7 @@ from torch.utils.data import TensorDataset, DataLoader, Dataset
 from typing import Callable, Union, List
 
 import data
-from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset
+from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset, ProbabilisticInfiniteDataset
 
 from disentangle.layers import get_fc_net, GradientReversal, GradientReversalFunction, get_1by1_conv1d_net, IdentityLayer, get_block_fc_net
 from utils import init
@@ -413,7 +413,8 @@ def exp(model: Model, train, test_unseen, bs=128, nb_epochs=100, a_lr=.00001, lo
                 opt.zero_grad()
                 #a_opt.zero_grad()
                 #d_opt.zero_grad()
-                fka, fkc, fy = [t.to(model.device).detach() for t in frnk_dataset.get_items_with_class(y)]
+                (fka, fkc), fy = frnk_dataset.get_items_with_class(y)
+                fka = fka.to(model.device); fkc = fkc.to(model.device); fy = fy.to(model.device)
                 #frnk_a_mask = A_mask[fy]  if masking else None
                 #fx1 = model.autoencoder.decode(fka, fkc, a_mask)
                 fx1 = model.autoencoder.decode(fka, fkc, a) # using a instead of a_mask!
@@ -517,10 +518,9 @@ def gen_zsl_test(autoencoder: Autoencoder,
         return autoencoder.encZ_KA(Z), autoencoder.encZ_KC(Z)
 
     if infinite_dataset:
-        dataset = InfiniteDataset(nb_gen_class_samples * nb_new_classes, enc_fn,
+        dataset = ProbabilisticInfiniteDataset(nb_gen_class_samples * nb_new_classes, enc_fn,
                                   train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
-                                  zsl_unseen_test_dict['class_attr_bin'],
-                                  use_context=autoencoder.use_context,
+                                  zsl_unseen_test_dict['class_attr_bin'], use_context=autoencoder.use_context,
                                   device=device)
 
     else:
@@ -538,8 +538,8 @@ def gen_zsl_test(autoencoder: Autoencoder,
         preds = []
         y_trues = []
         losses = []
-        for data in data_loader:
-            ka, kc, Y = data[0].to(device), data[1].to(device), data[2].to(device)
+        for encs, y in data_loader:
+            ka, kc, Y = encs[0].to(device), encs[1].to(device), y.to(device)
             optim.zero_grad()
             X = autoencoder.decode(ka, kc,  A[Y] if use_masking else None) # Using A instead of A_mask
             #X = autoencoder.decode(ka, kc,  A_mask[Y] if use_masking else None)
@@ -590,7 +590,7 @@ def tsne(model: Model, test_dicts, train_dict, nb_pca=None, nb_gen_class_samples
         data_loader = DataLoader(dataset, batch_size=128, shuffle=False)
 
         if infinite_dataset:
-            frankenstain_dataset = InfiniteDataset(nb_gen_class_samples * nb_classes, model.autoencoder.encode,
+            frankenstain_dataset = ProbabilisticInfiniteDataset(nb_gen_class_samples * nb_classes, model.autoencoder.encode,
                                                    train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
                                                    data_dict['class_attr_bin'],
                                                    use_context=model.autoencoder.use_context,
