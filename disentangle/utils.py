@@ -12,6 +12,11 @@ def init_weights(m: Module):
 
 
 
+def set_grad(parameters_or_module, value: bool):
+    parameters = parameters_or_module.parameters() if isinstance(parameters_or_module, nn.Module) else parameters_or_module
+    for param in parameters:
+        param.requires_grad = value
+
 def interlaced_repeat(x, dim, times):
     orig_shape = x.shape
     dims = []

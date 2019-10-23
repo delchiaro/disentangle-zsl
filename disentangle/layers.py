@@ -264,8 +264,7 @@ class BlockLinear(nn.Module):
         self.out_block_dim = out_block_dim
         self.n_blocks = n_blocks
 
-        self.weight =  nn.Parameter(data=torch.ones(n_blocks, out_block_dim, in_block_dim))
-        #self.weight = block_diag(self.params)
+        self.weight =  nn.Parameter(torch.Tensor(n_blocks, out_block_dim, in_block_dim))
         if bias:
             self.bias = nn.Parameter(torch.Tensor(out_block_dim*n_blocks))
         else:

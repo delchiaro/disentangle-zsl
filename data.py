@@ -5,7 +5,7 @@ import scipy.io
 import os
 import shutil
 
-DATA_PATH = './data/'
+DATA_PATH = '../0_data/'
 
 def download_data():
     # Ensure data dir exists.
@@ -148,10 +148,10 @@ def normalize_dataset(train, val=None, test_unseen=None, test_seen=None,
             min_max_scaler = preprocessing.MinMaxScaler(feats_range)
             train[key] = min_max_scaler.fit_transform(train[key])
             if val is not None:
-                val[key] = min_max_scaler.transform(val[key])
+                val[key] = min_max_scaler.fit_transform(val[key])
             if test_unseen is not None:
-                test_unseen[key] = min_max_scaler.transform(test_unseen[key])
+                test_unseen[key] = min_max_scaler.fit_transform(test_unseen[key])
             if test_seen is not None:
-                test_seen[key] = min_max_scaler.transform(test_seen[key])
+                test_seen[key] = min_max_scaler.fit_transform(test_seen[key])
     return train, val, test_unseen, test_seen
 

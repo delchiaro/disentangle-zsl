@@ -10,7 +10,6 @@ import data
 from disentangle.dataset_generator import InfiniteDataset, FrankensteinDataset
 
 from disentangle.layers import get_fc_net, GradientReversal, GradientReversalFunction, get_1by1_conv1d_net, IdentityLayer, get_block_fc_net
-from disentangle.loss_box import LossBox
 from utils import init
 
 from sklearn import metrics
@@ -26,6 +25,22 @@ def set_grad(parameters_or_module, value: bool):
     parameters = parameters_or_module.parameters() if isinstance(parameters_or_module, nn.Module) else parameters_or_module
     for param in parameters:
         param.requires_grad = value
+
+class LossBox:
+    def __init__(self, str_format='4.5f'):
+        self._d = {}
+        self._str_format = str_format
+
+    def append(self, name, loss):
+        if name not in self._d.keys():
+            self._d[name] = []
+        self._d[name].append(loss.detach().cpu())
+
+    def __str__(self):
+        s = ""
+        for key in self._d.keys():
+            s += f"  - Loss {key}:  {torch.stack(self._d[key]).mean():{self._str_format}}\n"
+        return s
 
 
 class Model(nn.Module, ABC):
@@ -90,7 +105,7 @@ class VAE(Model):
     def compute_loss(self, x, reconstructed_x, mean, log_var):
         RCL = F.l1_loss(reconstructed_x, x, size_average=False)   # reconstruction loss
         KLD = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())  # kl divergence loss
-        return RCL, KLD
+        return RCL + KLD
 
     def idx2onehot(self, idx):
         assert idx.shape[1] == 1
@@ -101,17 +116,16 @@ class VAE(Model):
 
     def fit_loader(self, train_loader, optimizer):
         self.train()
-        L = LossBox()
+        train_loss = 0
         for i, (x,) in enumerate(train_loader):
             x = x.to(self.device)
             optimizer.zero_grad()
             reconstructed_x, z_mu, z_var = self(x)
-            rcl, kld = self.compute_loss(x, reconstructed_x, z_mu, z_var)
-            (rcl+kld).backward()
-            L.append('rcl', rcl/len(x))
-            L.append('kld', kld/len(x))
+            loss = self.compute_loss(x, reconstructed_x, z_mu, z_var)
+            loss.backward()
+            train_loss += loss.item()
             optimizer.step()
-        return L
+        return train_loss
 
     def generate(self, nb_gen, label=None):
         # create a random latent vector
@@ -139,6 +153,7 @@ class VAE(Model):
         Ys = [NP(d[1]) for d in data]
         Y =  np.concatenate(Ys, axis=0)
 
+
         ### PCA
         if nb_pca_components is not None:
             pca = PCA(n_components=nb_pca_components)
@@ -149,6 +164,7 @@ class VAE(Model):
         ### TSNE FIT
         print("Fitting TSNE and transforming...")
         tsne_data = TSNE(n_components=2, **kwargs).fit_transform(X)
+
 
         b = len(Xs[0])
         Ts = [tsne_data[:b]]
@@ -209,9 +225,8 @@ if __name__ == '__main__':
     train_loader = DataLoader(trainset, batch_size=128, shuffle=True, drop_last=True)
 
     for ep in range(nb_epochs):
-        L = vae.fit_loader(train_loader, optimizer)
-        print(f'====> Epoch: {ep}:')
-        print(L)
+        loss = vae.fit_loader(train_loader, optimizer)
+        print(f'====> Epoch: {ep} Average loss: {loss/len(train_loader.dataset):.4f}')
         if (ep+1)%10 == 0:
             rec_x, _, _ = vae.forward(trainset_w_cls.tensors[0].to(device))
             rec_y = trainset_w_cls.tensors[1]
