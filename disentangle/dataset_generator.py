@@ -20,7 +20,7 @@ class InfiniteDataset(Dataset):
         :param test_attrs_bin:
         :param new_class_offset:
         :param device:
-        :param use_context: if True, the last output of the encoder will be considered a context (disconnected from attribute vector dimension)
+        :param use_context: if True, each output of the encoder will be considered a tuple formed by attribute-tensor and context-tensor
         :param args:
         """
         super().__init__(**args)
@@ -36,29 +36,34 @@ class InfiniteDataset(Dataset):
         ds = TensorDataset(torch.tensor(train_feats).float(), torch.tensor(train_labels).long())
         dl = DataLoader(ds, batch_size=128, shuffle=False, num_workers=6, pin_memory=False, drop_last=False)
 
-
         enc = self._encoder(next(iter(dl))[0].to(device))
-        if isinstance(enc, tuple) or isinstance(enc, set) or isinstance(enc, list):
-            encodings = [[] for _ in range(len(enc))]
+        multiple_outputs = True
+        if isinstance(enc[0], torch.Tensor):
+            multiple_outputs = False
+
+
+        if multiple_outputs:
+            attr_encodings = [[] for _ in range(len(enc))]
+            cntx_encodings = [[] for _ in range(len(enc))]
             def add_fn(tensors):
-                for t, E in zip(tensors, encodings):
-                    E.append(t.detach().cpu())
+                for t, AE, CE in zip(tensors, attr_encodings, cntx_encodings):
+                    AE.append(t[0].detach().cpu())
+                    CE.append(t[1].detach().cpu())
         else:
-            encodings = [[]]
+            attr_encodings = [[]]
+            cntx_encodings = [[]]
             def add_fn(tensor):
-                encodings[0].append(tensor.detach().cpu())
+                attr_encodings[0].append(tensor[0].detach().cpu())
+                attr_encodings[0].append(tensor[1].detach().cpu())
 
         for X in dl:
             X = X[0].to(device)
             tensors =  self._encoder(X)
             add_fn(tensors)
-        encodings = [torch.cat(E, dim=0) for E in encodings]
+        attr_encodings = [torch.cat(E, dim=0) for E in attr_encodings]
+        cntx_encodings = [torch.cat(E, dim=0) for E in cntx_encodings]
 
-        cntx_encodings = None
-        if use_context:
-            cntx_encodings = encodings[-1]
-            encodings = encodings[:-1]
-        self.encodings = [E.view(E.shape[0], self._nb_attributes, -1) for E in encodings]
+        self.attr_encodings = [E.view(E.shape[0], self._nb_attributes, -1) for E in attr_encodings]
         self.cntx_encodings = cntx_encodings
 
         # Find valid examples for each attribute.
@@ -76,24 +81,27 @@ class InfiniteDataset(Dataset):
         return self.get_item_with_class(cls)
 
     def get_items_with_class(self, Y):
-        ENCS, CLS = [], []
+        ATTR_ENCS, CNTX_ENCS, CLS = [], [], []
         for cls in Y:
-            enc, y = self.get_item_with_class(cls)
+            a_enc, c_enc, y = self.get_item_with_class(cls)
             #AE.append(ae[None, :]); CE.append(ce[None, :]), CLS.append(y)
-            ENCS.append(enc); CLS.append(y)
-        nb_examples = len(ENCS)
-        nb_outs = len(ENCS[0])
-        ENCS = [[ENCS[i][j] for i in range(nb_examples)] for j in range(nb_outs)]
-        ENCS = [torch.stack(E, dim=0) for E in ENCS]
-        return  ENCS,  torch.tensor(CLS)
+            ATTR_ENCS.append(a_enc); CNTX_ENCS.append(c_enc); CLS.append(y)
+        nb_examples = len(ATTR_ENCS)
+        nb_outs = len(ATTR_ENCS[0])
+        # TODO: Finire qua
+        ATTR_ENCS = [[ATTR_ENCS[i][j] for i in range(nb_examples)] for j in range(nb_outs)]
+        ATTR_ENCS = [torch.stack(E, dim=0) for E in ATTR_ENCS]
+        CNTX_ENCS = [[CNTX_ENCS[i][j] for i in range(nb_examples)] for j in range(nb_outs)]
+        CNTX_ENCS = [torch.stack(E, dim=0) for E in CNTX_ENCS]
+        return  ATTR_ENCS, CNTX_ENCS, torch.tensor(CLS)
 
 
     def get_item_with_class(self, cls):
         attr = self._test_attrs[cls]
         attr_indices, = np.where(attr)
 
-        frnk_enc = [np.zeros_like(E[0]).reshape([self._nb_attributes, -1]) for E in self.encodings]
-        contexts = []
+        frnk_enc = [np.zeros_like(E[0]).reshape([self._nb_attributes, -1]) for E in self.attr_encodings]
+        cntx_enc = [[] for E in self.cntx_encodings]
         for attr_idx in attr_indices:
             try:
                 example_idx = self._idx_active_attr[attr_idx][np.random.randint(len(self._idx_active_attr[attr_idx]))]
@@ -102,19 +110,18 @@ class InfiniteDataset(Dataset):
                 # t.with_traceback()
                 # raise t
                 continue
-            for i in range(len(self.encodings)):
-                frnk_enc[i][attr_idx, :] = self.encodings[i][example_idx, attr_idx, :]
+            for i in range(len(self.attr_encodings)):
+                frnk_enc[i][attr_idx, :] = self.attr_encodings[i][example_idx, attr_idx, :]
                 if self.cntx_encodings is not None:
-                    contexts.append(self.cntx_encodings[attr_idx])
+                    cntx_enc[i].append(self.cntx_encodings[i][attr_idx])
 
-        for i in range(len(self.encodings)):
+        for i in range(len(self.attr_encodings)):
             frnk_enc[i] = torch.tensor(frnk_enc[i].reshape(-1))
-
-        if self.cntx_encodings is not None:
-            # adding a random context to the list of features:
-            frnk_enc.append(contexts[np.random.randint(len(contexts))])
+            if self.cntx_encodings is not None:
+                # adding a random context to the list of features:
+                cntx_enc[i] = cntx_enc[i][np.random.randint(len(cntx_enc[i]))]
         cls = cls + self._new_class_offset
-        return frnk_enc, torch.tensor(cls)
+        return frnk_enc, cntx_enc, torch.tensor(cls)
 
 
 
