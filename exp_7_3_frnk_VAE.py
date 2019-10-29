@@ -439,7 +439,7 @@ if __name__ == '__main__':
 
             real = torch.ones(x.shape[0], 1).requires_grad_(False).to(device)
             fake = torch.zeros(x.shape[0], 1).requires_grad_(False).to(device)
-            
+
             real_mean = x.mean()
             real_std = x.std(0).mean()
 
