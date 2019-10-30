@@ -375,8 +375,9 @@ if __name__ == '__main__':
     ADVERSARIAL=True
     MASKING = True
 
-    #device, train, test_unseen, test_seen, val = init_exp(gpu=0, seed=42, dataset='AWA2', attr_in_01=ATTR_IN_01)
-    device, train, test_unseen, test_seen, val = init_exp(gpu=0,seed=None, dataset='AWA2', attr_in_01=ATTR_IN_01)
+    device, train, test_unseen, test_seen, val = init_exp(gpu=0, seed=42, dataset='AWA2', attr_in_01=ATTR_IN_01)
+    #device, train, test_unseen, test_seen, val = init_exp(gpu=0, seed=42, dataset='CUB', attr_in_01=ATTR_IN_01)
+    #device, train, test_unseen, test_seen, val = init_exp(gpu=0,seed=None, dataset='AWA2', attr_in_01=ATTR_IN_01)
 
     feats_dim = len(train['feats'][0])
     nb_train_classes, nb_attributes = train['class_attr'].shape
@@ -388,12 +389,12 @@ if __name__ == '__main__':
 
 
     vae = ADisVAE(feats_dim, 1536, nb_attributes=nb_attributes,
-                  latent_dim=8, cntx_latent_dim=512,
+                  latent_dim=16, cntx_latent_dim=512,
                   attr_in_01=ATTR_IN_01).to(device)
     discr = Discriminator(feats_dim).to(device)
 
     train_loader = DataLoader(trainset, batch_size=128, shuffle=True, drop_last=True)
-    opt_g = optim.Adam(vae.parameters(), lr=.0001, weight_decay=.0001)
+    opt_g = optim.Adam(vae.parameters(), lr=.0001, weight_decay=.001)
     opt_d = optim.Adam(discr.parameters(), lr=.00001, weight_decay=.001)
 
 
@@ -425,9 +426,9 @@ if __name__ == '__main__':
 
     adversarial_loss = torch.nn.BCELoss()
 
-    for ep in range(200):
+    for ep in range(100):
         if TRAIN_W_FRNK:
-            frnk_ds = ProbabilisticInfiniteDataset(nb_gen_class_samples * nb_test_classes, lambda x: vae.encoder(x),
+            frnk_ds = InfiniteDataset(nb_gen_class_samples * nb_test_classes, lambda x: vae.encoder(x),
                                       train['feats'], train['labels'], train['class_attr_bin'], train['class_attr_bin'],
                                       device=device, use_context=False)
         #lossbox = vae.fit_loader(train_loader, optimizer, alpha=(2000, 0, 1))
@@ -503,15 +504,15 @@ if __name__ == '__main__':
         if TRAIN_W_FRNK:
             print(frnkL)
 
-        if (ep+1)%10 == 0:
+        if (ep+1)%3 == 0:
             # Test on unseen-test-set:
             classifier = nn.Sequential(#nn.Linear(feats_dim, feats_dim), nn.ReLU(),
                                        L2Norm(10., norm_while_test=True),
                                        nn.Linear(feats_dim, nb_test_classes))
             zs_test(vae, classifier, train, test_unseen,
-                    nb_gen_class_samples=500, adapt_epochs=5, adapt_lr=.004, adapt_wd=.001,
+                    nb_gen_class_samples=500, adapt_epochs=7, adapt_lr=.003, adapt_wd=.001,
                     adapt_bs=128, mask_attr_key='class_attr_bin', device=device,
-                    plot_tsne=True, plot_tsne_l2_norm=False)
+                    plot_tsne=False, plot_tsne_l2_norm=False)
 
 
             # rec_y = trainset_w_cls.tensors[1]
