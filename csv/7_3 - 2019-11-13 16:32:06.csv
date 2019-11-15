@@ -1,0 +1,11 @@
+attr_latent_dim,cntx_latent_dim,hidden_dim,nb_epochs,g_lr,d_lr,g_wd,d_wd,l2_norm_alpha,adapt_epochs,adapt_lr,adapt_wd,adapt_gen_samples,test_period,adversarial,frnk_cycle,frnk_reconstruct,attr_in_01,cce,gpu,wseed,twseed,tfseed,write_csv
+32,512,2048,100,0.0001,1e-05,0,0,10,10,0.001,0,500,1,False,False,False,False,False,0,41,41,40,True
+
+
+epoch,enn-acc
+0,0.20063801248761265
+1,0.1963786548414304
+2,0.22077442983121992
+3,0.23666283519978254
+4,0.2470669993503011
+5,0.255710584707806

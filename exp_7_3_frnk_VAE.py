@@ -10,7 +10,7 @@ from disentangle.layers import get_fc_net, GradientReversal, GradientReversalFun
     L2Norm, BlockLinear
 from disentangle.loss_box import LossBox
 from disentangle.model import Model
-from utils import init
+from utils import init, set_seed
 from sklearn import metrics
 import numpy as np
 from utils import NP
@@ -39,6 +39,9 @@ def init_exp(gpu, seed, use_valid=False, download_data=False, preprocess_data=Fa
                                                                     feats_range=(0, 1))
 
     return device, train, test_unseen, test_seen, val
+
+def torch_where_idx(condition):
+    return condition.byte().nonzero()[:,0]
 
 #%% NETWORKS
 
@@ -258,6 +261,7 @@ def zs_test(vae: ADisVAE,
             mask_attr_key='class_attr_bin',
             plot_tsne=False,
             plot_tsne_l2_norm=True,
+            seed=None,
             device=None):
     test_A_mask = torch.tensor(test_dict[mask_attr_key]).float().to(device)
     test_A = torch.tensor(test_dict['class_attr']).float().to(device)
@@ -297,24 +301,31 @@ def zs_test(vae: ADisVAE,
         unseen_acc_nn = np.mean([metrics.recall_score(NP(y_trues), nn_preds, labels=[k], average=None) for k in sorted(set(NP(y_trues)))])
         return unseen_loss, unseen_acc, unseen_acc_nn
 
+
+    ######## OPTIMIZER PREPARATION ###########
+    test_classifier.to(device)
+    optim = torch.optim.Adam(test_classifier.parameters(), lr=adapt_lr, weight_decay=adapt_wd)
+
+
     ######## DATA GENERATION/PREPARATION ###########
+    if seed is not None:
+        set_seed(seed)
     # adapt_ds = ProbabilisticInfiniteDataset(nb_gen_class_samples * nb_test_classes, lambda x: vae.encoder(x),
     #                                         train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
     #                                         test_dict['class_attr_bin'],
     #                                         device=device, use_context=False)
+
     adapt_ds = InfiniteDataset(nb_gen_class_samples * nb_test_classes, vae.encode,
                                train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
-                               test_dict['class_attr_bin'], device=device)
+                               test_dict['class_attr_bin'], use_context=True, device=device)
     adapt_loader = DataLoader(adapt_ds, batch_size=adapt_bs, num_workers=0, shuffle=True, )
 
 
-
     ######## TRAINING NEW CLASSIFIER ###########
-    test_classifier.to(device)
-    optim = torch.optim.Adam(test_classifier.parameters(), lr=adapt_lr, weight_decay=adapt_wd)
     best_unseen_acc = 0
     best_classifier_state = None
-
+    unseen_accs = []
+    unseen_dap_accs = []
     for ep in range(adapt_epochs):
         rec_x = []
         rec_y = []
@@ -341,64 +352,236 @@ def zs_test(vae: ADisVAE,
         preds = torch.cat(preds); y_trues = torch.cat(y_trues); acc = (y_trues == preds).float().mean()
         classifier_losses = torch.stack(losses).mean()
         unseen_loss, unseen_acc, unseen_acc_nn = test_on_test()
-        # frnk_feats = np.concatenate(frnk_feats, axis=0)
-        # frnk_mean = np.mean(frnk_feats, axis=0)
-        # real_mean = np.mean(NP(test_feats), axis=0)
-        # frnk_std = np.mean(np.std(frnk_feats, axis=0))
-        # real_std = np.mean(np.std(NP(test_feats), axis=0))
-
+        unseen_accs.append(unseen_acc)
+        unseen_dap_accs.append(unseen_acc_nn)
         print(f"Classifier adaptation - Epoch {ep + 1}/{adapt_epochs}:   Loss={classifier_losses:1.5f}    Acc={acc:1.4f}  -  uLoss="
               f"{unseen_loss:1.5f}   uAcc={unseen_acc:1.5f}   1-NN-uACC={unseen_acc_nn}")
         if unseen_acc > best_unseen_acc:
             best_unseen_acc = unseen_acc
             best_classifier_state = test_classifier.state_dict()
         test_classifier.load_state_dict(best_classifier_state)
+
     if plot_tsne:
-        # tsne_plot([(test_feats, test_labels[:,None]), (torch.cat(rec_x), torch.cat(rec_y)[:,None])], append_title=f"",
-        #             perplexity=50, num_neighbors=6, early_exaggeration=12)
         rec_x = torch.cat(rec_x)
         rec_y = torch.cat(rec_y)[:, None]
         if plot_tsne_l2_norm:
             rec_x /= (torch.norm(rec_x, p=2, dim=1)[:, None]+np.finfo(float).eps)
             test_feats /= (torch.norm(test_feats, p=2, dim=1)[:, None]+np.finfo(float).eps)
-
         tsne_plot([(test_feats, test_labels[:, None]), (rec_x, rec_y)], append_title=f"", legend='brief')
 
-    return best_unseen_acc  # , best_classifier_state
+    return unseen_accs, np.mean(unseen_dap_accs)
+
+
+def zs_test_exemplarNN(vae: ADisVAE,
+                       train_dict,
+                       test_dict,
+                       nb_gen_class_samples=100,
+                       adapt_bs: int = 128,
+                       mask_attr_key='class_attr_bin',
+                       plot_tsne=False,
+                       plot_tsne_l2_norm=True,
+                       seed=None,
+                       device=None):
+    test_A_mask = torch.tensor(test_dict[mask_attr_key]).float().to(device)
+    test_A = torch.tensor(test_dict['class_attr']).float().to(device)
+    test_feats = torch.tensor(test_dict['feats']).float()
+    test_labels = torch.tensor(test_dict['labels']).long()
+    nb_test_classes = test_dict['class_attr_bin'].shape[0]
+    test_loader =  DataLoader(TensorDataset(test_feats, test_labels), batch_size=adapt_bs, num_workers=2, shuffle=True)
+
+    ######## DATA GENERATION/PREPARATION ###########
+    if seed is not None:
+        set_seed(seed)
+
+    adapt_ds = InfiniteDataset(nb_gen_class_samples * nb_test_classes, vae.encode,
+                               train_dict['feats'], train_dict['labels'], train_dict['class_attr_bin'],
+                               test_dict['class_attr_bin'], use_context=True, device=device)
+    adapt_loader = DataLoader(adapt_ds, batch_size=adapt_bs, num_workers=0, shuffle=True, )
+
+    print("Predict class exemplars")
+    rec_x = []
+    rec_y = []
+    for attr_emb, cntx_emb, y in adapt_loader:
+        mu_attr, var_attr = attr_emb[0].to(device), attr_emb[1].to(device)
+        mu_cntx, var_cntx = cntx_emb[0].to(device), cntx_emb[1].to(device)
+        y = y.to(device)
+        z_attr, z_cntx = vae.sample_z((mu_attr, mu_cntx), (var_attr, var_cntx))
+        x = vae.decode_x(z_attr, z_cntx, test_A_mask[y])
+        rec_x.append(x.detach().cpu().numpy())
+        rec_y.append(y.detach().cpu().numpy())
+    rec_x = np.vstack(rec_x)
+    rec_y = np.concatenate(rec_y)
+
+    exemplars = np.zeros([nb_test_classes, rec_x.shape[1]])
+    for y in range(nb_test_classes):
+        idx = np.argwhere(rec_y==y)[:, 0]
+        exemplars[y] = np.mean(rec_x[idx], axis=0)
+
+    exemplars_labels = np.arange(nb_test_classes)
+
+    print("Fit Exemplar-NN")
+    from sklearn.neighbors import KNeighborsClassifier
+    #nn_cls = KNeighborsClassifier(n_neighbors=1)
+    #nn_cls.fit(exemplars, exemplars_labels)
+
+
+    print("Predict test labels")
+    nn_preds = []
+    y_trues = []
+
+    for x, y in test_loader:
+        x = x.to(device)
+        y = y.to(device)
+        bs = len(x)
+        nb_masks = test_A_mask.shape[0]
+        # TODO: encode->decode using all the possible attributes and get the most probable using some criterion (the nearest at one of the exemplar?)
+        mu, var = vae.encode(x)
+
+        z_attr, z_cntx = vae.sample_z(mu, var)
+        per_mask_z_attr = torch.repeat_interleave(z_attr, nb_masks, dim=0)
+        per_mask_z_cntx = torch.repeat_interleave(z_cntx, nb_masks, dim=0)
+        a_mask = test_A_mask.repeat([bs, 1])
+        a_mask = a_mask.repeat_interleave(vae._latent_dim, dim=-1)
+        per_mask_z_attr = per_mask_z_attr * a_mask
+        x1 = vae.decode_x(per_mask_z_attr, per_mask_z_cntx)
+
+        # The first nb_masks elements is x[0] masked by the nb_masks different masks,
+        # The element from nb_masks to nb_masks*2-1 is x[1] masked by the nb_masks different masks, etc...
+        x1.view(bs, nb_masks, 2048)
+
+        from scipy.spatial.distance import cdist
+        dists = cdist(NP(x1), exemplars, metric='euclidean')
+        dists = np.reshape(dists, [bs, nb_masks, nb_masks])
+
+        # Per each element in batch, get the "best" masking (i.e. get the mask resulting in the shortest distance to one of the exemplars)
+        argmin = np.argmin(dists, axis=-1)
+
+        # Now we create the [bs x nb_exemplar] matrix
+        M = np.array([[dists[i, j, argmin[i, j]] for j in range(nb_masks)] for i in range(bs)])
+        preds = np.argmin(M, axis=-1)
+        #preds = nn_cls.predict(NP(x1))
+        nn_preds.append(preds)
+        y_trues.append(y)
+    y_trues = torch.cat(y_trues)
+    nn_preds = np.concatenate(nn_preds, axis=0)
+    unseen_acc_enn = np.mean([metrics.recall_score(NP(y_trues), nn_preds, labels=[k], average=None) for k in sorted(set(NP(y_trues)))])
+
+    if plot_tsne:
+        rec_x = torch.cat(rec_x)
+        rec_y = torch.cat(rec_y)[:, None]
+        if plot_tsne_l2_norm:
+            rec_x /= (torch.norm(rec_x, p=2, dim=1)[:, None]+np.finfo(float).eps)
+            test_feats /= (torch.norm(test_feats, p=2, dim=1)[:, None]+np.finfo(float).eps)
+        tsne_plot([(test_feats, test_labels[:, None]), (rec_x, rec_y)], append_title=f"", legend='brief')
+
+    print(f"Exemplar-NN acc: {unseen_acc_enn:2.5f}")
+    return unseen_acc_enn
+
 #%% MAIN
 from torch import optim
 
+def frankenstain_batch(z_mu, z_var, A, y):
+    z_mu_attr, z_mu_cntx = (t.detach() for t in z_mu)
+    z_var_attr, z_var_cntx = (t.detach() for t in z_var)
+    bs = z_mu_attr.shape[0]
+    nb_attributes = A.shape[1]
 
-if __name__ == '__main__':
-    ATTR_IN_01 = False
-    TRAIN_W_FRNK=False
-    ADVERSARIAL=True
-    MASKING = True
+    attr_encodings = (z_mu_attr.view(bs, nb_attributes, -1), z_var_attr.view(bs, nb_attributes, -1))
+    cntx_encodings = (z_mu_cntx, z_var_cntx)
 
-    device, train, test_unseen, test_seen, val = init_exp(gpu=0, seed=42, dataset='AWA2', attr_in_01=ATTR_IN_01)
-    #device, train, test_unseen, test_seen, val = init_exp(gpu=0, seed=42, dataset='CUB', attr_in_01=ATTR_IN_01)
+    K = A[y].long()#.cpu()
+
+    idx = torch.stack([(K * torch.stack([torch.randperm(bs) for _ in range(nb_attributes)]).t()).argmax(0).int() for _ in range(bs)]).long()
+    frnk_attr_encs = []
+    frnk_cntx_encs = []
+    for i in range(len(attr_encodings)):
+        a_enc = attr_encodings[i][idx, torch.arange(nb_attributes)] * K[:,:,None].repeat(1, 1, attr_encodings[i].shape[-1]).float().to(z_mu_attr.device)
+        frnk_attr_encs.append(a_enc)
+        frnk_cntx_encs.append(cntx_encodings[i])
+    return frnk_attr_encs, frnk_cntx_encs
+
+
+import csv
+from datetime import datetime
+
+
+def run_exp(attr_latent_dim=16,  # 8
+            cntx_latent_dim=512,
+            hidden_dim=1536,
+            nb_epochs=200,
+
+            g_lr=.0001,
+            d_lr=.00001,
+            g_wd=.001,
+            d_wd=.001,
+            l2_norm_alpha=10,
+
+            adapt_epochs=7,
+            adapt_lr=.003,
+            adapt_wd=.001,
+            adapt_gen_samples=500,
+            test_period=3,
+
+            adversarial=False,
+            frnk_cycle=False,
+            frnk_reconstruct=False,
+            attr_in_01=False,
+            cce=False,
+
+            gpu=0,
+            wseed=42,
+            twseed=42,
+            tfseed=42,
+            write_csv=True):
+    D_params = dict(locals())
+
+    if write_csv:
+        timestamp = datetime.fromtimestamp(datetime.timestamp(datetime.now())).strftime('%Y-%m-%d %H:%M:%S')
+        csv_fname = f'csv/7_3 - {timestamp}.csv'
+        with open(csv_fname, 'w') as csv_f:
+            csv_writer = csv.DictWriter(csv_f, D_params.keys())
+            csv_writer.writeheader()
+            csv_writer.writerow(D_params)
+            csv_writer = None
+
     #device, train, test_unseen, test_seen, val = init_exp(gpu=0,seed=None, dataset='AWA2', attr_in_01=ATTR_IN_01)
+    device, train, test_unseen, test_seen, val = init_exp(gpu=gpu, seed=wseed, dataset='AWA2', attr_in_01=attr_in_01)
+
+    # device, train, test_unseen, test_seen, val = init_exp(gpu=0, seed=42, dataset='CUB', attr_in_01=ATTR_IN_01)
+    # nb_gen_class_samples_train=1400
+    # nb_gen_class_samples_test=400
+    # adapt_epochs = 15
+    # adapt_lr = .003
+    # adapt_wd = .0001
+    # test_period = 10
 
     feats_dim = len(train['feats'][0])
     nb_train_classes, nb_attributes = train['class_attr'].shape
     nb_test_classes, _ = test_unseen['class_attr'].shape
 
-    A_mask = torch.tensor(train['attr_bin']).float()
-    A = torch.tensor(train['attr']).float()
-    trainset = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels']).long(), A_mask, A)
+    A_mask = torch.tensor(train['class_attr_bin']).float()
+    A = torch.tensor(train['class_attr']).float()
+
+    attribute_masks = torch.tensor(train['attr_bin']).float()
+    attributes = torch.tensor(train['attr']).float()
+    trainset = TensorDataset(torch.tensor(train['feats']).float(), torch.tensor(train['labels']).long(), attribute_masks, attributes)
 
 
-    vae = ADisVAE(feats_dim, 1536, nb_attributes=nb_attributes,
-                  latent_dim=16, cntx_latent_dim=512,
-                  attr_in_01=ATTR_IN_01).to(device)
+    vae = ADisVAE(feats_dim, hidden_dim, nb_attributes=nb_attributes,
+                  latent_dim=attr_latent_dim, cntx_latent_dim=cntx_latent_dim,
+                  attr_in_01=attr_in_01).to(device)
     discr = Discriminator(feats_dim).to(device)
+    classifier = nn.Sequential(L2Norm(l2_norm_alpha, norm_while_test=True),
+                               nn.Linear(feats_dim, nb_train_classes)).to(device)
 
     train_loader = DataLoader(trainset, batch_size=128, shuffle=True, drop_last=True)
-    opt_g = optim.Adam(vae.parameters(), lr=.0001, weight_decay=.001)
-    opt_d = optim.Adam(discr.parameters(), lr=.00001, weight_decay=.001)
 
+    opt_g = optim.Adam(list(vae.parameters()) + list(classifier.parameters()), lr=g_lr, weight_decay=g_wd)
+    opt_d = optim.Adam(discr.parameters(), lr=d_lr, weight_decay=d_wd)
 
-    nb_gen_class_samples=1400
+    # opt_g = optim.SGD(list(vae.parameters()) + list(classifier.parameters()), lr=g_lr,
+    #                   weight_decay=g_wd, momentum=.9, nesterov=False)
+    # opt_d = optim.SGD(discr.parameters(), lr=d_lr, weight_decay=d_wd, momentum=.8)
 
 
     def get_gen_loss(mu, var, x1, x, a1=None, ac=None, a=None, lossbox=None):
@@ -412,7 +595,7 @@ if __name__ == '__main__':
         loss = 1 * RCLX + 1 * KLD
         if a1 is not None:
             RCLA = F.l1_loss(a1, a, reduction='sum')  # reconstruction loss
-            L.append('RCL-A', RCLA / len(x));
+            L.append('RCL-A', RCLA / len(x))
             loss+= 50*RCLA
         if ac is not None:
             RCLA_cntx = F.l1_loss(ac, a, reduction='sum')
@@ -423,14 +606,14 @@ if __name__ == '__main__':
         L.append('total', loss / x.shape[0])
         return loss
 
-
     adversarial_loss = torch.nn.BCELoss()
 
-    for ep in range(100):
-        if TRAIN_W_FRNK:
-            frnk_ds = InfiniteDataset(nb_gen_class_samples * nb_test_classes, lambda x: vae.encoder(x),
-                                      train['feats'], train['labels'], train['class_attr_bin'], train['class_attr_bin'],
-                                      device=device, use_context=False)
+    D_results = []
+    for ep in range(nb_epochs):
+        # if TRAIN_W_FRNK:
+        #     frnk_ds = InfiniteDataset(nb_gen_class_samples_train * nb_test_classes, lambda x: vae.encoder(x),
+        #                               train['feats'], train['labels'], train['class_attr_bin'], train['class_attr_bin'],
+        #                               device=device, use_context=False)
         #lossbox = vae.fit_loader(train_loader, optimizer, alpha=(2000, 0, 1))
         vae.train()
         L = LossBox()
@@ -449,42 +632,74 @@ if __name__ == '__main__':
             reconstr_mean = x1.mean()
             reconstr_std = x1.std(0).mean()
             gen_loss = get_gen_loss(z_mu, z_var, x1, x, a1, ac, a, L)
-            if ADVERSARIAL:
+
+            if adversarial:
                 fooling_loss = adversarial_loss(discr(x1), real)
                 L.append('G-fooling', fooling_loss)
                 gen_loss = gen_loss + fooling_loss
+
+            if cce:
+                logits1 = classifier(x1)
+                cce1 = NN.cross_entropy(logits1, y.to(device))
+                gen_loss += cce1
+                L.append('CCE1', cce1)
+
             gen_loss.backward()
             opt_g.step()
 
-            if TRAIN_W_FRNK:
+            if frnk_cycle or frnk_reconstruct:
+                (frnk_mu_attr, frnk_var_attr), (frnk_mu_cntx, frnk_var_cntx) = frankenstain_batch(z_mu, z_var, A_mask, y)
+                frnk_mu_attr = frnk_mu_attr.view(frnk_mu_attr.shape[0], -1).to(device)
+                frnk_var_attr = frnk_var_attr.view(frnk_var_attr.shape[0], -1).to(device)
+                frnk_mu_cntx, frnk_var_cntx = frnk_mu_cntx.to(device), frnk_var_cntx.to(device)
+
                 opt_g.zero_grad()
-                (z_mu_attr, z_var_attr), (z_mu_cntx, z_var_cntx), fy = frnk_ds.get_items_with_class(NP(y))
-                z_mu = (z_mu_attr, z_mu_cntx) # torch.cat((z_mu_attr, z_mu_cntx), dim=1)
-                z_var = (z_var_attr, z_var_cntx) #torch.cat((z_var_attr, z_var_cntx), dim=1)
-                z_attr, z_cntx = vae.sample_z(z_mu, z_var, a_mask)
-                z_attr = z_attr.to(device)
-                z_cntx = z_cntx.to(device)
-                x1_frnk = vae.decode_x(z_attr, z_cntx, a_mask)
-                a1_frnk = vae.decode_a(z_attr)
-                ac_frnk = vae.cntx_attr_decoder(z_cntx)
+                frnk_mu = (frnk_mu_attr, frnk_mu_cntx) # torch.cat((z_mu_attr, z_mu_cntx), dim=1)
+                frnk_var = (frnk_var_attr, frnk_var_cntx) #torch.cat((z_var_attr, z_var_cntx), dim=1)
+                frnk_attr, frnk_cntx = vae.sample_z(frnk_mu, frnk_var, a_mask)
+                frnk_attr = frnk_attr.to(device)
+                frnk_cntx = frnk_cntx.to(device)
+                x1_frnk = vae.decode_x(frnk_attr, frnk_cntx, a_mask)
+                a1_frnk = vae.decode_a(frnk_attr)
+                ac_frnk = vae.cntx_attr_decoder(frnk_cntx)
+
+                (enc_frnk_mu_attr, enc_frnk_mu_cntx), (enc_frnk_var_attr, enc_frnk_var_cntx) = vae.encode(x1_frnk)
+
                 frnk_mean = x1_frnk.mean()
                 frnk_std = x1_frnk.var(0).mean()
 
-                frnk_loss = get_gen_loss(z_mu, z_var, x1_frnk, x, a1_frnk, ac_frnk, a, frnkL)
-                if ADVERSARIAL:
-                    fooling_loss = adversarial_loss(discr(x1_frnk), real)
-                    L.append('frankG-fooling', fooling_loss)
-                    frnk_loss = (frnk_loss + fooling_loss)
-                frnk_loss.backward()
+
+                loss = 0
+                if frnk_reconstruct:
+                    RCL_FRNK = F.l1_loss(x1_frnk, x, reduction='sum')  # reconstruction loss
+                    frnkL.append("RCL-frnk", RCL_FRNK / len(x1_frnk))
+                    loss += 10*RCL_FRNK
+
+                if frnk_cycle:
+                    CYCLE_mu = NN.l1_loss(enc_frnk_mu_attr, frnk_mu_attr.to(device), reduction='sum')
+                    CYCLE_var = NN.l1_loss(enc_frnk_var_attr, frnk_var_attr.to(device), reduction='sum')
+                    CYCLE = (CYCLE_mu + CYCLE_var) / 2
+                    loss += 5*CYCLE
+                    frnkL.append("CYCLE-frnk", CYCLE / len(x1_frnk))
+
+                loss.backward()
+
+
+                # frnk_loss = get_gen_loss(z_mu, z_var, x1_frnk, x, a1_frnk, ac_frnk, a, frnkL)
+                # if ADVERSARIAL:
+                #     fooling_loss = adversarial_loss(discr(x1_frnk), real)
+                #     L.append('frankG-fooling', fooling_loss)
+                #     frnk_loss = (frnk_loss + fooling_loss)
+                # frnk_loss.backward()
                 opt_g.step()
 
-            if ADVERSARIAL:
+            if adversarial:
                 opt_d.zero_grad()
                 real_loss = adversarial_loss(discr(x), real)
                 fake_loss = adversarial_loss(discr(x1.detach()), fake)
                 L.append('D-real', real_loss)
                 L.append('D-fake', fake_loss)
-                if TRAIN_W_FRNK:
+                if frnk_reconstruct or frnk_cycle:
                     fake_loss_frnk = adversarial_loss(discr(x1_frnk.detach()), fake)
                     L.append('frankG-fooling', fake_loss_frnk)
                     d_loss = (real_loss + (fake_loss + fake_loss_frnk)/2) / 2
@@ -495,45 +710,120 @@ if __name__ == '__main__':
 
         print(f"real:         {real_mean:2.4f}  +/- {real_std:2.4f}")
         print(f"reconstr:     {reconstr_mean:2.4f}  +/- {reconstr_std:2.4f}")
-        if TRAIN_W_FRNK:
+        if frnk_reconstruct or frnk_cycle:
             print(f"frankenstain: {frnk_mean:2.4f}  +/- {frnk_std:2.4f}")
         print("\n")
 
         print(f'====> Epoch: {ep+1}')
         print(L)
-        if TRAIN_W_FRNK:
+        if frnk_reconstruct or frnk_cycle:
             print(frnkL)
 
-        if (ep+1)%3 == 0:
+        if (ep+1)%test_period == 0:
             # Test on unseen-test-set:
-            classifier = nn.Sequential(#nn.Linear(feats_dim, feats_dim), nn.ReLU(),
-                                       L2Norm(10., norm_while_test=True),
-                                       nn.Linear(feats_dim, nb_test_classes))
-            zs_test(vae, classifier, train, test_unseen,
-                    nb_gen_class_samples=500, adapt_epochs=7, adapt_lr=.003, adapt_wd=.001,
-                    adapt_bs=128, mask_attr_key='class_attr_bin', device=device,
-                    plot_tsne=False, plot_tsne_l2_norm=False)
+            set_seed(twseed)
+            adapt_classifier = nn.Sequential(#nn.Linear(feats_dim, feats_dim), nn.ReLU(),
+                                             L2Norm(l2_norm_alpha, norm_while_test=True),
+                                             nn.Linear(feats_dim, nb_test_classes))
+            # accs, dap_acc = zs_test(vae, adapt_classifier, train, test_unseen,
+            #                         nb_gen_class_samples=adapt_gen_samples, adapt_epochs=adapt_epochs, adapt_lr=adapt_lr, adapt_wd=adapt_wd,
+            #                         adapt_bs=128, mask_attr_key='class_attr_bin', device=device,
+            #                         plot_tsne=False, plot_tsne_l2_norm=False, seed=tfseed)
+
+            enn_acc = zs_test_exemplarNN(vae, train, test_unseen, adapt_bs=128, mask_attr_key='class_attr_bin', device=device,
+                                               plot_tsne=False, plot_tsne_l2_norm=False, seed=tfseed)
 
 
-            # rec_y = trainset_w_cls.tensors[1]
-            # mu, var = vae.encoder(trainset_w_cls.tensors[0].to(device))
-            # z = vae.sample_z(mu, var)
-            # if MASKING:
-            #     rec_x = vae.decoder(vae.mask(z.to('cpu'), A_mask).to(device))
-            #     a1 = vae.attr_decoder(mu)
-            # else:
-            #     rec_x = vae.decoder(z)
-            # tsne_plot([trainset_w_cls.tensors, (rec_x, rec_y)], append_title=f" - Epoch={ep + 1}",
-            #               perplexity = 50, num_neighbors = 6, early_exaggeration = 12)
+            #D_results.append({'epoch': ep, 'best-acc': np.max(accs), 'zs-accs': accs, 'mean-acc': np.mean(accs), 'DAP-1NN-acc': dap_acc})
+            D_results.append({'epoch': ep, 'enn-acc': enn_acc})
+
+            if write_csv:
+                with open(csv_fname, 'a') as csv_f:
+                    if csv_writer is None:
+                        csv_f.write("\n\n")
+                        csv_writer = csv.DictWriter(csv_f, D_results[-1].keys())
+                        csv_writer.writeheader()
+                    else:
+                        csv_writer = csv.DictWriter(csv_f, D_results[-1].keys())
+                    csv_writer.writerow(D_results[-1])
+
+    return D_results, D_params
 
 
-            # classifier = get_fc_net(feats_dim, hidden_sizes=None, output_size=nb_train_classes)
-            # zs_test(vae, classifier, train, train,
-            #         nb_gen_class_samples=200, adapt_epochs=1, adapt_lr=.004, adapt_bs=128, mask_attr_key='class_attr_bin', device=device,
-            #         plot_tsne=False, plot_tsne_l2_norm=False)
+
+import os
+if __name__ == '__main__':
+    g_wd = 0 # 1e-5
+    d_wd = 0 # 1e-4
+    adapt_wd = 0 # 1e-4
+
+    def csv_fname_fn():
+        return f'csv/7_3 - {datetime.fromtimestamp(datetime.timestamp(datetime.now())).strftime("%Y-%m-%d %H:%M:%S")} - SUMMARY.csv'
+    csv_fname = None
+
+    PARAMS = []
+    BEST_RESULTS = []
+    for adversarial in (False, ):
+        for adversarial in (False, ):
+            for frnk_cycle in (False, ):
+                for frnk_reconstruct in (False, ):
+                #for wd in (0, .00001, .001):
+                    for seed, tfseed in (#[40, 40], [40, 41], [40, 42],
+                                         [41, 40], [41, 41], [41, 42],
+                                         [42, 40], [42, 41], [42, 42], ):
+
+                        D_results, D_Params = run_exp(attr_latent_dim=32,  # 8
+                                                      cntx_latent_dim=512,
+                                                      hidden_dim=2048,
+                                                      nb_epochs=100,
+
+                                                      #g_lr=.000001,
+                                                      g_lr=.0001,
+                                                      d_lr=.00001,
+                                                      g_wd=g_wd,
+                                                      d_wd=d_wd,
+                                                      l2_norm_alpha=10,
+
+                                                      adapt_epochs=10,
+                                                      adapt_lr=.001,
+                                                      adapt_wd=adapt_wd,
+                                                      adapt_gen_samples=500,
+                                                      test_period=1,
+                                                      adversarial=adversarial,
+                                                      frnk_cycle=frnk_cycle,
+                                                      frnk_reconstruct=frnk_reconstruct,
+
+                                                      attr_in_01=False,
+                                                      wseed=seed,
+                                                      twseed=seed,
+                                                      tfseed=tfseed,)
+                        best_test_accs = [d_result['best-acc'] for d_result in D_results]
+                        best = np.argmax(best_test_accs)
+                        BEST_RESULTS.append(D_results[best])
+                        PARAMS.append(D_Params)
+
+                        D = {**D_results[best], **D_Params}
+
+                        if csv_fname is None:
+                            csv_fname = csv_fname_fn()
+                            with open(csv_fname, 'w') as csv_f:
+                                csv_writer = csv.DictWriter(csv_f, D.keys())
+                                csv_writer.writeheader()
+                                csv_writer.writerow(D)
+                        else:
+                            old_name = csv_fname
+                            csv_fname = csv_fname_fn()
+                            os.rename(old_name, csv_fname)
+                            with open(csv_fname, 'a') as csv_f:
+                                csv_writer = csv.DictWriter(csv_f, D.keys())
+                                csv_writer.writerow(D)
 
 
-    # TODO:
+
+
+
+
+
 
 #%% TRASHCAN
 

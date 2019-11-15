@@ -1,5 +1,5 @@
 from abc import ABC
-import torch
+import torch.nn
 
 class Model(torch.nn.Module, ABC):
     def __init__(self):
