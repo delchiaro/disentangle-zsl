@@ -5,12 +5,11 @@ from torchmeta.transforms import ClassSplitter, Categorical
 from torchmeta.utils.data import BatchMetaDataLoader
 from torchvision.transforms import Compose, Resize, ToTensor
 
-from MetaTensorDataset import TensorMetaDataset
 from disentangle.layers import L2Norm, BlockLinear
 from utils import NP
 
 from torch.utils.data import TensorDataset, DataLoader, Dataset
-from typing import Callable, Union, List, Tuple, Union, _VariadicGenericAlias, TypeVar
+from typing import Callable, Union, List, Tuple, Union, TypeVar
 import data
 
 from disentangle.loss_box import LossBox
